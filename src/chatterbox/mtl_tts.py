@@ -19,12 +19,16 @@ from .models.t3.modules.cond_enc import T3Cond
 
 
 REPO_ID = "ResembleAI/chatterbox"
+SPANISH_SPAIN_REPO_ID = "ResembleAI/Chatterbox-Multilingual-es-es"
+SPANISH_SPAIN_T3_MODEL = "t3_es_es.safetensors"
+SPANISH_SPAIN_S3GEN_MODEL = "s3gen_v3.pt"
 DEFAULT_MULTILINGUAL_T3_MODEL = "t3_mtl23ls_v2.safetensors"
 MULTILINGUAL_T3_MODELS = {
     "v2": "t3_mtl23ls_v2.safetensors",
     "t3_mtl23ls_v2": "t3_mtl23ls_v2.safetensors",
     "v3": "t3_mtl23ls_v3.safetensors",
     "t3_mtl23ls_v3": "t3_mtl23ls_v3.safetensors",
+    "es-es": SPANISH_SPAIN_T3_MODEL,
 }
 
 # Supported languages for the multilingual model
@@ -185,6 +189,7 @@ class ChatterboxMultilingualTTS:
         ckpt_dir,
         device,
         t3_model: str | None = None,
+        s3gen_model: str = "s3gen.pt",
     ) -> 'ChatterboxMultilingualTTS':
         ckpt_dir = Path(ckpt_dir)
         t3_model = _resolve_multilingual_t3_model(t3_model)
@@ -210,7 +215,8 @@ class ChatterboxMultilingualTTS:
 
         s3gen = S3Gen()
         s3gen.load_state_dict(
-            torch.load(ckpt_dir / "s3gen.pt", map_location=map_location, weights_only=True)
+            torch.load(ckpt_dir / s3gen_model, map_location=map_location, weights_only=True),
+            strict=False,
         )
         s3gen.to(device).eval()
 
@@ -238,17 +244,35 @@ class ChatterboxMultilingualTTS:
                 print("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
             device = "cpu"
 
+        use_spanish_spain_model = t3_model == "es-es"
         t3_model = _resolve_multilingual_t3_model(t3_model)
         ckpt_dir = Path(
             snapshot_download(
                 repo_id=REPO_ID,
                 repo_type="model",
                 revision="main",
-                allow_patterns=["ve.pt", t3_model, "s3gen.pt", "grapheme_mtl_merged_expanded_v1.json", "conds.pt", "Cangjie5_TC.json"],
+                allow_patterns=["ve.pt", "grapheme_mtl_merged_expanded_v1.json", "conds.pt", "Cangjie5_TC.json"] if use_spanish_spain_model else ["ve.pt", t3_model, "s3gen.pt", "grapheme_mtl_merged_expanded_v1.json", "conds.pt", "Cangjie5_TC.json"],
                 token=os.getenv("HF_TOKEN"),
             )
         )
-        return cls.from_local(ckpt_dir, device, t3_model=t3_model)
+        if not use_spanish_spain_model:
+            return cls.from_local(ckpt_dir, device, t3_model=t3_model)
+
+        spanish_spain_dir = Path(
+            snapshot_download(
+                repo_id=SPANISH_SPAIN_REPO_ID,
+                repo_type="model",
+                revision="main",
+                allow_patterns=[SPANISH_SPAIN_T3_MODEL, SPANISH_SPAIN_S3GEN_MODEL],
+                token=os.getenv("HF_TOKEN"),
+            )
+        )
+        return cls.from_local(
+            ckpt_dir,
+            device,
+            t3_model=str(spanish_spain_dir / SPANISH_SPAIN_T3_MODEL),
+            s3gen_model=str(spanish_spain_dir / SPANISH_SPAIN_S3GEN_MODEL),
+        )
     
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
         ## Load reference wav
