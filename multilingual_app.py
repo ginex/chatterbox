@@ -382,14 +382,18 @@ def required_podcast_assets(blocks: list[dict[str, str | int]]) -> set[str]:
     return assets
 
 
-def load_mono_audio(path: Path, target_sample_rate: int) -> torch.Tensor:
+def load_audio(path: Path, target_sample_rate: int) -> torch.Tensor:
     audio, sample_rate = ta.load(str(path))
     audio = audio.to(dtype=torch.float32)
-    if audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)
     if sample_rate != target_sample_rate:
         audio = ta.functional.resample(audio, sample_rate, target_sample_rate)
     return audio
+
+
+def as_stereo(audio: torch.Tensor) -> torch.Tensor:
+    if audio.shape[0] == 1:
+        return audio.repeat(2, 1)
+    return audio[:2]
 
 
 def loop_audio(audio: torch.Tensor, target_length: int) -> torch.Tensor:
@@ -406,11 +410,14 @@ def mix_voice_with_ducked_music(
     fade_out_seconds: float = 1.0,
 ) -> torch.Tensor:
     """Mix voice with an energy-driven music envelope for radio-style ducking."""
+    voice = as_stereo(voice)
+    music = as_stereo(music)
     music = loop_audio(music, voice.shape[-1])
     frame_length = max(1, int(sample_rate * 0.04))
+    voice_mono = voice.mean(dim=0, keepdim=True)
     voice_energy = torch.sqrt(
         torch.nn.functional.avg_pool1d(
-            voice.abs().pow(2),
+            voice_mono.abs().pow(2),
             kernel_size=frame_length,
             stride=frame_length,
             ceil_mode=True,
@@ -458,9 +465,9 @@ def mix_podcast_blocks(
 ) -> None:
     mixed_parts = []
     for index, (block, block_path) in enumerate(zip(blocks, block_paths)):
-        voice = load_mono_audio(block_path, sample_rate)
+        voice = as_stereo(load_audio(block_path, sample_rate))
         if background_filename := podcast_background_filename(block):
-            music = load_mono_audio(PODCAST_MUSIC_DIR / background_filename, sample_rate)
+            music = load_audio(PODCAST_MUSIC_DIR / background_filename, sample_rate)
             voice = mix_voice_with_ducked_music(voice, music, sample_rate)
         mixed_parts.append(voice)
 
@@ -468,7 +475,7 @@ def mix_podcast_blocks(
             transition_filename = podcast_transition_filename(block, blocks[index + 1])
             if transition_filename:
                 mixed_parts.append(
-                    load_mono_audio(PODCAST_MUSIC_DIR / transition_filename, sample_rate)
+                    as_stereo(load_audio(PODCAST_MUSIC_DIR / transition_filename, sample_rate))
                 )
 
     temporary_output_path = output_path.with_suffix(".tmp.wav")
@@ -485,7 +492,7 @@ def concatenate_audio_files(
     pause = torch.zeros(1, int(sample_rate * pause_seconds))
     combined_parts = []
     for index, path in enumerate(paths):
-        audio = load_mono_audio(path, sample_rate)
+        audio = load_audio(path, sample_rate)
         if index:
             combined_parts.append(pause.to(dtype=audio.dtype))
         combined_parts.append(audio)
@@ -599,6 +606,7 @@ def generate_tts_audio(
         "t3_model": T3_MODEL,
         "chunks": [item["text"] for item in work_items],
         "podcast_blocks": podcast_blocks,
+        "podcast_mix_version": 2 if podcast_blocks else 1,
         "music_assets": music_assets,
     }
     job_payload = json.dumps(request_data, ensure_ascii=False, sort_keys=True).encode("utf-8")
