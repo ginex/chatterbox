@@ -463,20 +463,39 @@ def mix_podcast_blocks(
     output_path: Path,
     sample_rate: int,
 ) -> None:
-    mixed_parts = []
-    for index, (block, block_path) in enumerate(zip(blocks, block_paths)):
+    block_audio = []
+    for block, block_path in zip(blocks, block_paths):
         voice = as_stereo(load_audio(block_path, sample_rate))
         if background_filename := podcast_background_filename(block):
             music = load_audio(PODCAST_MUSIC_DIR / background_filename, sample_rate)
             voice = mix_voice_with_ducked_music(voice, music, sample_rate)
-        mixed_parts.append(voice)
+        block_audio.append(voice)
 
-        if index + 1 < len(blocks):
-            transition_filename = podcast_transition_filename(block, blocks[index + 1])
-            if transition_filename:
-                mixed_parts.append(
-                    as_stereo(load_audio(PODCAST_MUSIC_DIR / transition_filename, sample_rate))
-                )
+    mixed_parts = [block_audio[0]]
+    jingle_overlap_samples = int(sample_rate * 2.0)
+    for index, next_audio in enumerate(block_audio[1:]):
+        transition_filename = podcast_transition_filename(blocks[index], blocks[index + 1])
+        if not transition_filename:
+            mixed_parts.append(next_audio)
+            continue
+
+        jingle = as_stereo(load_audio(PODCAST_MUSIC_DIR / transition_filename, sample_rate))
+        overlap_samples = min(
+            jingle_overlap_samples,
+            jingle.shape[-1],
+            next_audio.shape[-1],
+        )
+        if overlap_samples == 0:
+            mixed_parts.extend((jingle, next_audio))
+            continue
+
+        if jingle.shape[-1] > overlap_samples:
+            mixed_parts.append(jingle[..., :-overlap_samples])
+        overlap = jingle[..., -overlap_samples:] + next_audio[..., :overlap_samples]
+        peak = float(overlap.abs().max())
+        if peak > 0.98:
+            overlap = overlap * (0.98 / peak)
+        mixed_parts.extend((overlap, next_audio[..., overlap_samples:]))
 
     temporary_output_path = output_path.with_suffix(".tmp.wav")
     ta.save(str(temporary_output_path), torch.cat(mixed_parts, dim=-1), sample_rate)
@@ -606,7 +625,7 @@ def generate_tts_audio(
         "t3_model": T3_MODEL,
         "chunks": [item["text"] for item in work_items],
         "podcast_blocks": podcast_blocks,
-        "podcast_mix_version": 2 if podcast_blocks else 1,
+        "podcast_mix_version": 3 if podcast_blocks else 1,
         "music_assets": music_assets,
     }
     job_payload = json.dumps(request_data, ensure_ascii=False, sort_keys=True).encode("utf-8")

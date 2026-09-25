@@ -14,3 +14,6 @@ Place these WAV files in this directory:
 Files may use any sample rate and may be mono or stereo. The mixer converts them
 to the model sample rate, preserves stereo files, and duplicates mono files across
 both channels. The generated mono voice is centered in the stereo podcast mix.
+
+The final 2 seconds of each jingle overlap the beginning of the following spoken
+block. Background and final music do not overlap when changing between blocks.
