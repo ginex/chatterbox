@@ -1,5 +1,5 @@
 import random
-import os
+import gc
 import re
 import time
 import hashlib
@@ -9,16 +9,26 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio as ta
-from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+from chatterbox.tts import ChatterboxTTS
 import gradio as gr
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-T3_MODEL = os.getenv("CHATTERBOX_MULTILINGUAL_T3_MODEL", "es-es")
+UI_LANGUAGES = {
+    "es": "Español",
+    "en": "Inglés",
+    "fr": "Francés",
+}
+LANGUAGE_MODELS = {
+    "es": {"key": "es-es", "name": "Español (España)"},
+    "en": {"key": "en", "name": "Chatterbox English"},
+    "fr": {"key": "v3", "name": "Multilingual V3"},
+}
 print(f"🚀 Running on device: {DEVICE}")
-print(f"Using multilingual T3 model: {T3_MODEL}")
 
 # --- Global Model Initialization ---
 MODEL = None
+LOADED_MODEL_KEY = None
 APP_DATA_DIR = Path(__file__).resolve().parent / "chatterbox_output"
 JOBS_DIR = APP_DATA_DIR / "jobs"
 REFERENCE_DIR = APP_DATA_DIR / "reference"
@@ -201,44 +211,48 @@ def persist_reference_audio(reference: str | None) -> str | None:
     return str(destination.resolve())
 
 
-def get_supported_languages_display() -> str:
-    """Generate a formatted display of all supported languages."""
-    language_items = []
-    for code, name in sorted(SUPPORTED_LANGUAGES.items()):
-        language_items.append(f"**{name}** (`{code}`)")
-    
-    # Split into 2 lines
-    mid = len(language_items) // 2
-    line1 = " • ".join(language_items[:mid])
-    line2 = " • ".join(language_items[mid:])
-    
-    return f"""
-### 🌍 Supported Languages ({len(SUPPORTED_LANGUAGES)} total)
-{line1}
+def get_or_load_model(language_id: str = "es"):
+    """Load the model selected for a language, reusing Hugging Face's disk cache."""
+    global MODEL, LOADED_MODEL_KEY
+    model_spec = LANGUAGE_MODELS.get(language_id)
+    if model_spec is None:
+        raise ValueError(f"Unsupported UI language: {language_id}")
 
-{line2}
-"""
+    model_key = model_spec["key"]
+    if MODEL is not None and LOADED_MODEL_KEY == model_key:
+        return MODEL
 
+    if MODEL is not None:
+        print(f"Unloading model {LOADED_MODEL_KEY} before loading {model_key}...")
+        MODEL = None
+        LOADED_MODEL_KEY = None
+        gc.collect()
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
 
-def get_or_load_model():
-    """Loads the ChatterboxMultilingualTTS model if it hasn't been loaded already,
-    and ensures it's on the correct device."""
-    global MODEL
-    if MODEL is None:
-        print("Model not loaded, initializing...")
-        try:
-            MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE, t3_model=T3_MODEL)
-            if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
-                MODEL.to(DEVICE)
-            print(f"Model loaded successfully. Internal device: {getattr(MODEL, 'device', 'N/A')}")
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
+    print(f"Loading model {model_key} for {UI_LANGUAGES[language_id]}...")
+    try:
+        if model_key == "en":
+            MODEL = ChatterboxTTS.from_pretrained(DEVICE)
+        else:
+            MODEL = ChatterboxMultilingualTTS.from_pretrained(
+                DEVICE,
+                t3_model=model_key,
+            )
+        LOADED_MODEL_KEY = model_key
+        if hasattr(MODEL, 'to') and str(MODEL.device) != DEVICE:
+            MODEL.to(DEVICE)
+        print(f"Model {model_key} loaded. Internal device: {getattr(MODEL, 'device', 'N/A')}")
+    except Exception as e:
+        MODEL = None
+        LOADED_MODEL_KEY = None
+        print(f"Error loading model {model_key}: {e}")
+        raise
     return MODEL
 
-# Attempt to load the model at startup.
+# Load the original Spanish model at startup.
 try:
-    get_or_load_model()
+    get_or_load_model("es")
 except Exception as e:
     print(f"CRITICAL: Failed to load model on startup. Application may not function. Error: {e}")
 
@@ -551,7 +565,7 @@ def generate_tts_audio(
     Returns:
         str: Path to the persistent combined WAV file.
     """
-    current_model = get_or_load_model()
+    current_model = get_or_load_model(language_id)
 
     if current_model is None:
         raise RuntimeError("TTS model is not loaded.")
@@ -622,7 +636,7 @@ def generate_tts_audio(
         "temperature": float(temperature_input),
         "seed": int(seed_num_input),
         "cfg_weight": float(cfgw_input),
-        "t3_model": T3_MODEL,
+        "t3_model": LANGUAGE_MODELS[language_id]["key"],
         "chunks": [item["text"] for item in work_items],
         "podcast_blocks": podcast_blocks,
         "podcast_mix_version": 3 if podcast_blocks else 1,
@@ -694,11 +708,14 @@ def generate_tts_audio(
         eta = f" ETA: {remaining_seconds / 60:.1f} min" if remaining_seconds is not None else ""
         progress((index - 1, len(work_items)), desc=f"Generating part {index}/{len(work_items)}.{eta}")
         print(f"Generating part {index}/{len(work_items)}: '{chunk[:50]}...'")
-        wav = current_model.generate(
-            chunk,
-            language_id=language_id,
-            **generate_kwargs
-        )
+        if language_id == "en":
+            wav = current_model.generate(chunk, **generate_kwargs)
+        else:
+            wav = current_model.generate(
+                chunk,
+                language_id=language_id,
+                **generate_kwargs
+            )
         temporary_chunk_path = chunk_path.with_suffix(".tmp.wav")
         ta.save(str(temporary_chunk_path), wav.detach().cpu(), current_model.sr)
         temporary_chunk_path.replace(chunk_path)
@@ -729,22 +746,12 @@ def generate_tts_audio(
     return str(combined_path.resolve())
 
 with gr.Blocks() as demo:
-    if T3_MODEL == "es-es":
-        gr.Markdown(
-            """
-            # Chatterbox Español (España)
-            Síntesis de voz optimizada para español de España con clonación de voz mediante audio de referencia.
-            """
-        )
-        gr.Markdown("**Idioma:** Español de España (`es`)")
-    else:
-        gr.Markdown(
-            """
-            # Chatterbox Multilingual Demo
-            Generate high-quality multilingual speech from text with reference audio styling, supporting 23 languages.
-            """
-        )
-        gr.Markdown(get_supported_languages_display())
+    gr.Markdown(
+        """
+        # Chatterbox TTS
+        Síntesis de voz con modelos optimizados para español, inglés y francés.
+        """
+    )
 
     with gr.Row():
         with gr.Column():
@@ -757,10 +764,13 @@ with gr.Blocks() as demo:
             )
             
             language_id = gr.Dropdown(
-                choices=["es"] if T3_MODEL == "es-es" else list(ChatterboxMultilingualTTS.get_supported_languages().keys()),
+                choices=[(name, code) for code, name in UI_LANGUAGES.items()],
                 value=initial_lang,
-                label="Language",
-                info="Select the language for text-to-speech synthesis"
+                label="Idioma",
+                info="Selecciona el idioma para la síntesis de voz"
+            )
+            model_status = gr.Markdown(
+                f"**Modelo activo:** {LANGUAGE_MODELS[initial_lang]['name']}"
             )
             
             ref_wav = gr.Audio(
@@ -804,13 +814,18 @@ with gr.Blocks() as demo:
             gr.Markdown(f"Los jingles y fondos del podcast se leen desde `{PODCAST_MUSIC_DIR}`")
 
         def on_language_change(lang, current_ref, current_text):
-            return default_audio_for_ui(lang), default_text_for_ui(lang)
+            get_or_load_model(lang)
+            return (
+                default_audio_for_ui(lang),
+                default_text_for_ui(lang),
+                f"**Modelo activo:** {LANGUAGE_MODELS[lang]['name']}",
+            )
 
         language_id.change(
             fn=on_language_change,
             inputs=[language_id, ref_wav, text],
-            outputs=[ref_wav, text],
-            show_progress=False
+            outputs=[ref_wav, text, model_status],
+            show_progress="full"
         )
 
     run_btn.click(
