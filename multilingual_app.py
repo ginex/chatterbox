@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+import lameenc
 import numpy as np
 import torch
 import torchaudio as ta
@@ -535,7 +536,62 @@ def concatenate_audio_files(
     temporary_output_path.replace(output_path)
 
 
-def generate_tts_audio(
+def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate_kbps: int = 192) -> None:
+    audio, sample_rate = ta.load(str(wav_path))
+    channels = min(audio.shape[0], 2)
+    pcm = (audio[:channels].clamp(-1, 1) * 32767).to(torch.int16).T.contiguous().numpy()
+
+    encoder = lameenc.Encoder()
+    encoder.set_bit_rate(bitrate_kbps)
+    encoder.set_in_sample_rate(sample_rate)
+    encoder.set_channels(channels)
+    encoder.set_quality(2)
+    mp3_data = encoder.encode(pcm.tobytes()) + encoder.flush()
+
+    temporary_mp3_path = mp3_path.with_suffix(".tmp.mp3")
+    temporary_mp3_path.write_bytes(mp3_data)
+    temporary_mp3_path.replace(mp3_path)
+
+
+def list_script_files(scripts_dir: str | None) -> list[Path]:
+    if not scripts_dir or not scripts_dir.strip():
+        return []
+    directory = Path(scripts_dir.strip())
+    if not directory.is_dir():
+        return []
+    return sorted(
+        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".txt"),
+        key=lambda path: path.name.lower(),
+    )
+
+
+def read_script_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="cp1252")
+
+
+def browse_scripts_directory(current_dir: str | None) -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(
+            initialdir=current_dir or None,
+            title="Selecciona el directorio de guiones (.txt)",
+        )
+        root.destroy()
+    except Exception as e:
+        print(f"Could not open directory dialog: {e}")
+        return current_dir or ""
+    return selected or current_dir or ""
+
+
+def synthesize_script(
     text_input: str,
     language_id: str,
     audio_prompt_path_input: str = None,
@@ -543,28 +599,11 @@ def generate_tts_audio(
     temperature_input: float = 0.8,
     seed_num_input: int = 0,
     cfgw_input: float = 0.5,
-    progress=gr.Progress()
-) -> str:
-    """
-    Generate high-quality speech audio from text using Chatterbox Multilingual model with optional reference audio styling.
-    Supported languages: English, French, German, Spanish, Italian, Portuguese, and Hindi.
-    
-    This tool synthesizes natural-sounding speech from input text. When a reference audio file 
-    is provided, it captures the speaker's voice characteristics and speaking style. The generated audio 
-    maintains the prosody, tone, and vocal qualities of the reference speaker, or uses default voice if no reference is provided.
-
-    Args:
-        text_input (str): The text to synthesize into speech (maximum 100,000 characters)
-        language_id (str): The language code for synthesis (eg. en, fr, de, es, it, pt, hi)
-        audio_prompt_path_input (str, optional): File path or URL to the reference audio file that defines the target voice style. Defaults to None.
-        exaggeration_input (float, optional): Controls speech expressiveness (0.25-2.0, neutral=0.5, extreme values may be unstable). Defaults to 0.5.
-        temperature_input (float, optional): Controls randomness in generation (0.05-5.0, higher=more varied). Defaults to 0.8.
-        seed_num_input (int, optional): Random seed for reproducible results (0 for random generation). Defaults to 0.
-        cfgw_input (float, optional): CFG/Pace weight controlling generation guidance (0.2-1.0). Defaults to 0.5, 0 for language transfer. 
-
-    Returns:
-        str: Path to the persistent combined WAV file.
-    """
+    progress=gr.Progress(),
+    progress_prefix: str = "",
+    remember_request: bool = True,
+) -> Path:
+    """Synthesize one script into a resumable job and return the combined WAV path."""
     current_model = get_or_load_model(language_id)
 
     if current_model is None:
@@ -648,12 +687,13 @@ def generate_tts_audio(
     job_dir.mkdir(exist_ok=True)
     combined_path = job_dir / "combined.wav"
     manifest_path = job_dir / "manifest.json"
-    save_json(LAST_REQUEST_PATH, request_data)
+    if remember_request:
+        save_json(LAST_REQUEST_PATH, request_data)
 
     if combined_path.is_file():
-        progress(1, desc="Recovered completed audio")
+        progress(1, desc=f"{progress_prefix}Recovered completed audio")
         print(f"Recovered completed job {job_id}: {combined_path}")
-        return str(combined_path.resolve())
+        return combined_path.resolve()
 
     manifest = {
         **request_data,
@@ -698,7 +738,7 @@ def generate_tts_audio(
                     manifest["completed_chunks"] = index
                     save_json(manifest_path, manifest)
                     print(f"Reusing saved part {index}/{len(work_items)}")
-                    progress((index, len(work_items)), desc=f"Recovered part {index}/{len(work_items)}")
+                    progress((index, len(work_items)), desc=f"{progress_prefix}Recovered part {index}/{len(work_items)}")
                     continue
             except Exception:
                 chunk_path.unlink(missing_ok=True)
@@ -706,7 +746,7 @@ def generate_tts_audio(
         elapsed = time.monotonic() - started_at
         remaining_seconds = (elapsed / generated_this_run) * (len(work_items) - index + 1) if generated_this_run > 0 else None
         eta = f" ETA: {remaining_seconds / 60:.1f} min" if remaining_seconds is not None else ""
-        progress((index - 1, len(work_items)), desc=f"Generating part {index}/{len(work_items)}.{eta}")
+        progress((index - 1, len(work_items)), desc=f"{progress_prefix}Generating part {index}/{len(work_items)}.{eta}")
         print(f"Generating part {index}/{len(work_items)}: '{chunk[:50]}...'")
         if language_id == "en":
             wav = current_model.generate(chunk, **generate_kwargs)
@@ -741,9 +781,88 @@ def generate_tts_audio(
     manifest["status"] = "complete"
     save_json(manifest_path, manifest)
 
-    progress(1, desc="Audio complete")
+    progress(1, desc=f"{progress_prefix}Audio complete")
     print(f"All audio parts generated and combined: {combined_path}")
-    return str(combined_path.resolve())
+    return combined_path.resolve()
+
+
+def generate_tts_audio(
+    text_input: str,
+    scripts_dir: str,
+    language_id: str,
+    audio_prompt_path_input: str = None,
+    exaggeration_input: float = 0.5,
+    temperature_input: float = 0.8,
+    seed_num_input: int = 0,
+    cfgw_input: float = 0.5,
+    progress=gr.Progress()
+):
+    """
+    Generate speech from text, or from every .txt script in a directory when the text is empty.
+
+    With text, a combined WAV is produced. With a scripts directory, each .txt becomes a
+    separate MP3 next to it (same name, .mp3 extension) and its intermediate WAV files are
+    deleted once the MP3 is written. Interrupted jobs keep their parts so they can be resumed.
+
+    Args:
+        text_input (str): The text to synthesize into speech (maximum 100,000 characters). Leave empty to use scripts_dir.
+        scripts_dir (str): Directory containing .txt scripts, used only when text_input is empty.
+        language_id (str): The language code for synthesis (es, en, fr)
+        audio_prompt_path_input (str, optional): File path or URL to the reference audio file that defines the target voice style. Defaults to None.
+        exaggeration_input (float, optional): Controls speech expressiveness (0.25-2.0, neutral=0.5, extreme values may be unstable). Defaults to 0.5.
+        temperature_input (float, optional): Controls randomness in generation (0.05-5.0, higher=more varied). Defaults to 0.8.
+        seed_num_input (int, optional): Random seed for reproducible results (0 for random generation). Defaults to 0.
+        cfgw_input (float, optional): CFG/Pace weight controlling generation guidance (0.2-1.0). Defaults to 0.5, 0 for language transfer.
+
+    Returns:
+        tuple: Path to the combined WAV (text mode) and newline-separated generated MP3 paths (directory mode).
+    """
+    generation_args = (
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input,
+    )
+    if text_input and text_input.strip():
+        combined_path = synthesize_script(text_input, *generation_args, progress=progress)
+        return str(combined_path), ""
+
+    script_files = list_script_files(scripts_dir)
+    if not script_files:
+        raise gr.Error("No hay texto ni un directorio con ficheros .txt disponibles.")
+
+    mp3_paths = []
+    for file_index, script_path in enumerate(script_files, start=1):
+        mp3_path = script_path.with_suffix(".mp3")
+        prefix = f"[{file_index}/{len(script_files)}] {script_path.name}: "
+        if mp3_path.is_file():
+            print(f"Skipping {script_path.name}: {mp3_path.name} already exists")
+            mp3_paths.append(str(mp3_path.resolve()))
+            continue
+
+        script_text = read_script_file(script_path)
+        if not script_text.strip():
+            gr.Warning(f"{script_path.name} está vacío; se omite.")
+            continue
+
+        print(f"Processing script {file_index}/{len(script_files)}: {script_path}")
+        combined_path = synthesize_script(
+            script_text,
+            *generation_args,
+            progress=progress,
+            progress_prefix=prefix,
+            remember_request=False,
+        )
+        progress(1, desc=f"{prefix}Converting to MP3")
+        convert_wav_to_mp3(combined_path, mp3_path)
+        shutil.rmtree(combined_path.parent, ignore_errors=True)
+        print(f"Saved {mp3_path} and removed intermediate files")
+        mp3_paths.append(str(mp3_path.resolve()))
+
+    progress(1, desc="All scripts complete")
+    return gr.update(), "\n".join(mp3_paths)
 
 with gr.Blocks() as demo:
     gr.Markdown(
@@ -761,6 +880,20 @@ with gr.Blocks() as demo:
                 label="Text to synthesize (max chars 100,000)",
                 max_lines=12,
                 max_length=100000
+            )
+            with gr.Row():
+                scripts_dir = gr.Textbox(
+                    label="Directorio de guiones (.txt)",
+                    info="Se usa solo si el cuadro de texto está vacío. Cada .txt genera un .mp3 con el mismo nombre.",
+                    placeholder="C:\\ruta\\a\\guiones",
+                    scale=4,
+                )
+                browse_btn = gr.Button("Examinar...", scale=1)
+            browse_btn.click(
+                fn=browse_scripts_directory,
+                inputs=[scripts_dir],
+                outputs=[scripts_dir],
+                show_progress=False,
             )
             
             language_id = gr.Dropdown(
@@ -810,6 +943,11 @@ with gr.Blocks() as demo:
                 label="Combined output audio",
                 format="wav",
             )
+            mp3_output = gr.Textbox(
+                label="MP3 generados desde el directorio",
+                lines=4,
+                interactive=False,
+            )
             gr.Markdown(f"Los trabajos y fragmentos se guardan en `{JOBS_DIR}`")
             gr.Markdown(f"Los jingles y fondos del podcast se leen desde `{PODCAST_MUSIC_DIR}`")
 
@@ -832,6 +970,7 @@ with gr.Blocks() as demo:
         fn=generate_tts_audio,
         inputs=[
             text,
+            scripts_dir,
             language_id,
             ref_wav,
             exaggeration,
@@ -839,7 +978,7 @@ with gr.Blocks() as demo:
             seed_num,
             cfg_weight,
         ],
-        outputs=[audio_output],
+        outputs=[audio_output, mp3_output],
     )
 
 demo.launch(mcp_server=True)
