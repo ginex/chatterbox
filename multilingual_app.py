@@ -600,15 +600,22 @@ def humanize_slug(slug: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def clean_title(text: str) -> str:
+    text = text.strip().rstrip(".").strip()
+    if text.isupper():
+        text = ". ".join(sentence[:1].upper() + sentence[1:] for sentence in text.lower().split(". "))
+    return text
+
+
 def script_block_title(
     tag_blocks: list[dict[str, str | int]],
     fallback: str,
-    tags: tuple[str, ...] = ("SECCION", "NOMBRE_CAPITULO"),
+    tags: tuple[str, ...] = ("SECCION", "FINAL", "NOMBRE_CAPITULO"),
 ) -> str:
     for tag in tags:
         for block in tag_blocks:
             if block["tag"] == tag and str(block["text"]).strip():
-                return str(block["text"]).strip().splitlines()[0].strip()
+                return clean_title(str(block["text"]).strip().splitlines()[0])
     return fallback
 
 
