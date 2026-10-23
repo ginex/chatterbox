@@ -54,9 +54,9 @@ PODCAST_BLOCK_PATTERN = re.compile(
     rf"\[({'|'.join(PODCAST_BLOCK_TAGS)})\]",
     flags=re.IGNORECASE,
 )
-# {podcast}__{idioma}__c{NN}-b{NN}__{titulo-en-slug}.txt
+# {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo-en-slug}.txt
 SCRIPT_NAME_PATTERN = re.compile(
-    r"^(?P<podcast>.+?)__(?P<language>[a-z]{2})__c(?P<chapter>\d+)-b(?P<block>\d+)__(?P<slug>.+)$",
+    r"^(?P<podcast>.+?)__(?P<language>[a-z]{2})__c(?P<chapter>\d+)(?:-b(?P<block>\d+))?__(?P<slug>.+)$",
     flags=re.IGNORECASE,
 )
 PROCESSED_SCRIPTS_DIRNAME = "processed"
@@ -596,7 +596,7 @@ def parse_script_name(path: Path) -> dict[str, str | int] | None:
         "podcast": match["podcast"],
         "language": match["language"].lower(),
         "chapter": int(match["chapter"]),
-        "block": int(match["block"]),
+        "block": int(match["block"] or 1),
         "slug": match["slug"],
     }
 
@@ -949,7 +949,7 @@ def generate_tts_audio(
 
     chapters = group_chapter_scripts(script_files)
     if not chapters:
-        raise gr.Error("No hay guiones con formato {podcast}__{idioma}__c{NN}-b{NN}__{titulo}.txt en el directorio.")
+        raise gr.Error("No hay guiones con formato {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt en el directorio.")
 
     mp3_paths = []
     for chapter_index, ((podcast, chapter_language, chapter), chapter_scripts) in enumerate(chapters.items(), start=1):
@@ -1020,18 +1020,19 @@ def generate_tts_audio(
                     intro_script = intro_script or script_path.name
                 else:
                     body.append((tag_block, segment))
-            if not body:
-                continue
-            blocks_metadata.append({
-                "order": info["block"],
-                "title": script_block_title(
-                    [tag_block for tag_block, _ in body],
-                    humanize_slug(str(info["slug"])),
-                ),
-                "script": script_path.name,
-                "start_sec": round(body[0][1][0]),
-                "end_sec": round(body[-1][1][1]),
-            })
+            # A single-file chapter holds every block, so each SECCION/FINAL tag becomes its own block.
+            body_groups = [[item] for item in body] if len(chapter_scripts) == 1 else [body] if body else []
+            for group in body_groups:
+                blocks_metadata.append({
+                    "order": len(blocks_metadata) + 1 if len(chapter_scripts) == 1 else info["block"],
+                    "title": script_block_title(
+                        [tag_block for tag_block, _ in group],
+                        humanize_slug(str(info["slug"])),
+                    ),
+                    "script": script_path.name,
+                    "start_sec": round(group[0][1][0]),
+                    "end_sec": round(group[-1][1][1]),
+                })
         if intro_segments:
             blocks_metadata.insert(0, {
                 "order": 0,
@@ -1094,7 +1095,7 @@ with gr.Blocks() as demo:
             with gr.Row():
                 scripts_dir = gr.Textbox(
                     label="Directorio de guiones (.txt)",
-                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}-b{NN}__{titulo}.txt. Cada capítulo genera jobs/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json y los .txt usados van a processed/.",
+                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt (sin -b{NN} si el capítulo va en un solo fichero). Cada capítulo genera jobs/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json y los .txt usados van a processed/.",
                     placeholder="C:\\ruta\\a\\guiones",
                     scale=4,
                 )
