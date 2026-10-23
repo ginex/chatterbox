@@ -577,7 +577,13 @@ def list_script_files(scripts_dir: str | None) -> list[Path]:
     if not directory.is_dir():
         return []
     return sorted(
-        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".txt"),
+        (
+            path
+            for path in directory.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() == ".txt"
+            and PROCESSED_SCRIPTS_DIRNAME not in path.relative_to(directory).parts[:-1]
+        ),
         key=lambda path: path.name.lower(),
     )
 
