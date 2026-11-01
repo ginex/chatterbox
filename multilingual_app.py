@@ -62,6 +62,7 @@ SCRIPT_NAME_PATTERN = re.compile(
 PROCESSED_SCRIPTS_DIRNAME = "processed"
 INTRO_TAGS = ("NOMBRE_PODCAST", "NOMBRE_CAPITULO", "INTRO_CAPITULO")
 MP3_BITRATE_KBPS = 192
+VOICE_TARGET_DBFS = -20.0
 
 LANGUAGE_CONFIG = {
     "ar": {
@@ -534,6 +535,33 @@ def mix_podcast_blocks(
     return block_ranges
 
 
+def normalize_voice_loudness(
+    audio: torch.Tensor,
+    sample_rate: int,
+    target_dbfs: float = VOICE_TARGET_DBFS,
+    peak_limit: float = 0.98,
+) -> torch.Tensor:
+    """Scale speech so its RMS over non-silent frames matches target_dbfs."""
+    frame_length = max(1, int(sample_rate * 0.05))
+    frame_rms = torch.sqrt(
+        torch.nn.functional.avg_pool1d(
+            audio.mean(dim=0, keepdim=True).pow(2),
+            kernel_size=frame_length,
+            stride=frame_length,
+            ceil_mode=True,
+        ) + 1e-12
+    ).flatten()
+    active_frames = frame_rms[frame_rms > 10 ** (-50 / 20)]
+    if active_frames.numel() == 0:
+        return audio
+    speech_rms = float(torch.sqrt(active_frames.pow(2).mean()))
+    gain = (10 ** (target_dbfs / 20)) / speech_rms
+    peak = float(audio.abs().max()) * gain
+    if peak > peak_limit:
+        gain *= peak_limit / peak
+    return audio * gain
+
+
 def concatenate_audio_files(
     paths: list[Path],
     output_path: Path,
@@ -548,8 +576,9 @@ def concatenate_audio_files(
             combined_parts.append(pause.to(dtype=audio.dtype))
         combined_parts.append(audio)
 
+    combined = normalize_voice_loudness(torch.cat(combined_parts, dim=-1), sample_rate)
     temporary_output_path = output_path.with_suffix(".tmp.wav")
-    ta.save(str(temporary_output_path), torch.cat(combined_parts, dim=-1), sample_rate)
+    ta.save(str(temporary_output_path), combined, sample_rate)
     temporary_output_path.replace(output_path)
 
 
@@ -657,6 +686,22 @@ def read_script_file(path: Path) -> str:
         return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         return path.read_text(encoding="cp1252")
+
+
+def describe_script_files(scripts_dir: str | None) -> str:
+    if not scripts_dir or not scripts_dir.strip():
+        return ""
+    directory = Path(scripts_dir.strip())
+    if not directory.is_dir():
+        return "El directorio no existe."
+    script_files = list_script_files(scripts_dir)
+    if not script_files:
+        return "No hay guiones .txt pendientes en este directorio."
+    lines = [
+        str(path.relative_to(directory)) + ("" if parse_script_name(path) else "  (nombre no válido, se ignorará)")
+        for path in script_files
+    ]
+    return f"{len(script_files)} guion(es):\n" + "\n".join(lines)
 
 
 def browse_scripts_directory(current_dir: str | None) -> str:
@@ -777,7 +822,11 @@ def synthesize_script(
         save_json(LAST_REQUEST_PATH, request_data)
 
     previous_manifest = load_json(manifest_path) or {}
-    if combined_path.is_file() and (not podcast_blocks or "segments_sec" in previous_manifest):
+    if (
+        combined_path.is_file()
+        and (not podcast_blocks or "segments_sec" in previous_manifest)
+        and previous_manifest.get("voice_target_dbfs") == VOICE_TARGET_DBFS
+    ):
         progress(1, desc=f"{progress_prefix}Recovered completed audio")
         print(f"Recovered completed job {job_id}: {combined_path}")
         return combined_path.resolve()
@@ -869,6 +918,7 @@ def synthesize_script(
         manifest["block_outputs"] = [str(path.resolve()) for path in block_paths]
     else:
         concatenate_audio_files(chunk_paths, combined_path, current_model.sr)
+    manifest["voice_target_dbfs"] = VOICE_TARGET_DBFS
     manifest["status"] = "complete"
     save_json(manifest_path, manifest)
 
@@ -1100,10 +1150,22 @@ with gr.Blocks() as demo:
                     scale=4,
                 )
                 browse_btn = gr.Button("Examinar...", scale=1)
+            scripts_list = gr.Textbox(
+                label="Guiones encontrados",
+                lines=6,
+                max_lines=15,
+                interactive=False,
+            )
             browse_btn.click(
                 fn=browse_scripts_directory,
                 inputs=[scripts_dir],
                 outputs=[scripts_dir],
+                show_progress=False,
+            )
+            scripts_dir.change(
+                fn=describe_script_files,
+                inputs=[scripts_dir],
+                outputs=[scripts_list],
                 show_progress=False,
             )
             
@@ -1190,6 +1252,11 @@ with gr.Blocks() as demo:
             cfg_weight,
         ],
         outputs=[audio_output, mp3_output],
+    ).then(
+        fn=describe_script_files,
+        inputs=[scripts_dir],
+        outputs=[scripts_list],
+        show_progress=False,
     )
 
 demo.launch(mcp_server=True)
