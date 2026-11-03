@@ -731,6 +731,7 @@ def synthesize_script(
     temperature_input: float = 0.8,
     seed_num_input: int = 0,
     cfgw_input: float = 0.5,
+    speed_input: float = 1.0,
     progress=gr.Progress(),
     progress_prefix: str = "",
     remember_request: bool = True,
@@ -812,6 +813,9 @@ def synthesize_script(
         "podcast_mix_version": 3 if podcast_blocks else 1,
         "music_assets": music_assets,
     }
+    # Only included when changed so existing jobs keep their hash and cached chunks.
+    if float(speed_input) != 1.0:
+        request_data["speed"] = float(speed_input)
     job_payload = json.dumps(request_data, ensure_ascii=False, sort_keys=True).encode("utf-8")
     job_id = hashlib.sha256(job_payload).hexdigest()[:16]
     job_dir = JOBS_DIR / job_id
@@ -846,6 +850,7 @@ def synthesize_script(
         "exaggeration": exaggeration_input,
         "temperature": temperature_input,
         "cfg_weight": cfgw_input,
+        "speed": float(speed_input),
     }
     if chosen_prompt:
         generate_kwargs["audio_prompt_path"] = chosen_prompt
@@ -957,6 +962,7 @@ def generate_tts_audio(
     temperature_input: float = 0.8,
     seed_num_input: int = 0,
     cfgw_input: float = 0.5,
+    speed_input: float = 1.0,
     progress=gr.Progress()
 ):
     """
@@ -977,6 +983,7 @@ def generate_tts_audio(
         temperature_input (float, optional): Controls randomness in generation (0.05-5.0, higher=more varied). Defaults to 0.8.
         seed_num_input (int, optional): Random seed for reproducible results (0 for random generation). Defaults to 0.
         cfgw_input (float, optional): CFG/Pace weight controlling generation guidance (0.2-1.0). Defaults to 0.5, 0 for language transfer.
+        speed_input (float, optional): Speech tempo multiplier (0.75-1.25, <1 slower). Pitch is preserved. Defaults to 1.0.
 
     Returns:
         tuple: Path to the combined WAV (text mode) and newline-separated generated MP3 paths (directory mode).
@@ -988,6 +995,7 @@ def generate_tts_audio(
         temperature_input,
         seed_num_input,
         cfgw_input,
+        speed_input,
     )
     if text_input and text_input.strip():
         combined_path = synthesize_script(text_input, *generation_args, progress=progress)
@@ -1203,6 +1211,9 @@ with gr.Blocks() as demo:
             cfg_weight = gr.Slider(
                 0.2, 1, step=.05, label="CFG/Pace", value=last_request_value("cfg_weight", .5)
             )
+            speed = gr.Slider(
+                0.75, 1.25, step=.05, label="Velocidad (1 = normal, <1 más lento)", value=last_request_value("speed", 1.0)
+            )
 
             with gr.Accordion("More options", open=False):
                 seed_num = gr.Number(value=last_request_value("seed", 0), label="Random seed (0 for random)")
@@ -1250,6 +1261,7 @@ with gr.Blocks() as demo:
             temp,
             seed_num,
             cfg_weight,
+            speed,
         ],
         outputs=[audio_output, mp3_output],
     ).then(

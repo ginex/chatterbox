@@ -339,6 +339,7 @@ class S3Token2Wav(S3Token2Mel):
         drop_invalid_tokens=True,
         n_cfm_timesteps=None,
         speech_token_lens=None,
+        speed: float = 1.0,
     ):
         # hallucination prevention, drop special tokens
         # if drop_invalid_tokens:
@@ -353,6 +354,11 @@ class S3Token2Wav(S3Token2Mel):
             n_cfm_timesteps=n_cfm_timesteps,
             finalize=True,
         )
+        if speed != 1.0:
+            # Time-stretch the mel (CosyVoice-style); the vocoder re-estimates F0, so pitch is preserved.
+            output_mels = torch.nn.functional.interpolate(
+                output_mels, size=max(1, int(output_mels.shape[-1] / speed)), mode="linear"
+            )
         output_mels = output_mels.to(dtype=self.dtype) # FIXME (fp16 mode) is this still needed?
         output_wavs, output_sources = self.hift_inference(output_mels, None)
 

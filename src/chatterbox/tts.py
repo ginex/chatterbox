@@ -215,6 +215,7 @@ class ChatterboxTTS:
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
+        speed=1.0,
     ):
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
@@ -266,6 +267,7 @@ class ChatterboxTTS:
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.gen,
+                speed=speed,
             )
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)

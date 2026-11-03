@@ -312,6 +312,7 @@ class ChatterboxMultilingualTTS:
         repetition_penalty=1.2,
         min_p=0.05,
         top_p=1.0,
+        speed=1.0,
     ):
         # Validate language_id
         if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
@@ -366,6 +367,7 @@ class ChatterboxMultilingualTTS:
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.gen,
+                speed=speed,
             )
             wav = wav.squeeze(0).detach().cpu().numpy()
 
@@ -373,7 +375,7 @@ class ChatterboxMultilingualTTS:
             # EOS with degraded attention and decodes to ~40 ms of noise.
             n_tokens = int(speech_tokens.shape[-1])
             st_len = max(1, n_tokens - 1)
-            wav = wav[: st_len * (S3GEN_SR // S3_TOKEN_RATE)]
+            wav = wav[: int(st_len * (S3GEN_SR // S3_TOKEN_RATE) / speed)]
 
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
