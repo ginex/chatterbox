@@ -34,12 +34,15 @@ print(f"🚀 Running on device: {DEVICE}")
 MODEL = None
 LOADED_MODEL_KEY = None
 APP_DATA_DIR = Path(__file__).resolve().parent / "chatterbox_output"
-JOBS_DIR = APP_DATA_DIR / "jobs"
+CACHE_DIR = APP_DATA_DIR / "cache"
+# Mirrors the R2 bucket layout: {podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json
+PUBLISH_DIR = APP_DATA_DIR / "publish"
 REFERENCE_DIR = APP_DATA_DIR / "reference"
 PODCAST_MUSIC_DIR = Path(__file__).resolve().parent / "podcast_music"
 LAST_REQUEST_PATH = APP_DATA_DIR / "last_request.json"
 APP_DATA_DIR.mkdir(exist_ok=True)
-JOBS_DIR.mkdir(exist_ok=True)
+CACHE_DIR.mkdir(exist_ok=True)
+PUBLISH_DIR.mkdir(exist_ok=True)
 REFERENCE_DIR.mkdir(exist_ok=True)
 PODCAST_MUSIC_DIR.mkdir(exist_ok=True)
 
@@ -203,7 +206,7 @@ def get_saved_reference_path() -> str | None:
 
 
 def get_latest_combined_path() -> str | None:
-    combined_files = list(JOBS_DIR.glob("*/combined.wav"))
+    combined_files = list(CACHE_DIR.glob("*/combined.wav"))
     if not combined_files:
         return None
     latest_file = max(combined_files, key=lambda path: path.stat().st_mtime)
@@ -289,13 +292,35 @@ def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | N
     return LANGUAGE_CONFIG.get(language_id, {}).get("audio")
 
 
+NON_TERMINAL_ABBREVIATIONS = frozenset({
+    "sr", "sra", "srta", "sres", "dr", "dra", "lic", "ing", "prof", "arq",
+    "ud", "uds", "vd", "vds", "dña", "sto", "sta", "ee", "ej",
+    "núm", "nº", "pág", "págs", "art", "cap", "vol", "aprox", "av", "avda",
+    "vs", "mr", "mrs", "ms", "st", "e.g", "i.e", "mme", "mlle",
+})
+
+
+def ends_with_abbreviation(sentence: str) -> bool:
+    last_word = sentence.rsplit(maxsplit=1)[-1].lstrip("([¿¡\"'«")
+    if not last_word.endswith("."):
+        return False
+    token = last_word[:-1].lower()
+    # Single letters cover initials (J. K. Rowling) and "p. ej.".
+    return token in NON_TERMINAL_ABBREVIATIONS or (len(token) == 1 and token.isalpha())
+
+
 def split_text_into_chunks(text: str, max_chars: int = 300) -> list[str]:
     """Split text near max_chars, preferring sentence and clause boundaries."""
     normalized_text = " ".join(text.split())
     if not normalized_text:
         return []
 
-    sentences = re.split(r"(?<=[.!?。！？])\s+", normalized_text)
+    sentences = []
+    for piece in re.split(r"(?<=[.!?。！？])\s+", normalized_text):
+        if sentences and ends_with_abbreviation(sentences[-1]):
+            sentences[-1] = f"{sentences[-1]} {piece}"
+        else:
+            sentences.append(piece)
     chunks = []
     current_chunk = ""
 
@@ -314,7 +339,7 @@ def split_text_into_chunks(text: str, max_chars: int = 300) -> list[str]:
             chunks.append(current_chunk)
             current_chunk = ""
 
-        clauses = re.split(r"(?<=[,;:，；：])\s*", sentence)
+        clauses = re.split(r"(?<=[,;:])\s+|(?<=[，；：])", sentence)
         for clause in clauses:
             words = clause.split()
             while words:
@@ -675,9 +700,8 @@ def group_chapter_scripts(script_files: list[Path]) -> dict[tuple[str, str, int]
     return dict(sorted(chapters.items()))
 
 
-def move_to_processed(script_path: Path) -> None:
-    processed_dir = script_path.parent / PROCESSED_SCRIPTS_DIRNAME
-    processed_dir.mkdir(exist_ok=True)
+def move_to_processed(script_path: Path, processed_dir: Path) -> None:
+    processed_dir.mkdir(parents=True, exist_ok=True)
     script_path.replace(processed_dir / script_path.name)
 
 
@@ -688,20 +712,24 @@ def read_script_file(path: Path) -> str:
         return path.read_text(encoding="cp1252")
 
 
-def describe_script_files(scripts_dir: str | None) -> str:
+def describe_script_files(scripts_dir: str | None):
     if not scripts_dir or not scripts_dir.strip():
-        return ""
+        return gr.update(choices=[], value=[], info=None)
     directory = Path(scripts_dir.strip())
     if not directory.is_dir():
-        return "El directorio no existe."
+        return gr.update(choices=[], value=[], info="El directorio no existe.")
     script_files = list_script_files(scripts_dir)
-    if not script_files:
-        return "No hay guiones .txt pendientes en este directorio."
-    lines = [
-        str(path.relative_to(directory)) + ("" if parse_script_name(path) else "  (nombre no válido, se ignorará)")
-        for path in script_files
-    ]
-    return f"{len(script_files)} guion(es):\n" + "\n".join(lines)
+    valid_scripts = [path for path in script_files if parse_script_name(path)]
+    invalid_scripts = [path for path in script_files if not parse_script_name(path)]
+    if not valid_scripts:
+        info = "No hay guiones .txt pendientes en este directorio."
+    else:
+        info = f"{len(valid_scripts)} guion(es). Desmarca los que no quieras generar todavía."
+    if invalid_scripts:
+        names = ", ".join(str(path.relative_to(directory)) for path in invalid_scripts)
+        info += f" Se ignoran por nombre no válido: {names}"
+    choices = [str(path.relative_to(directory)) for path in valid_scripts]
+    return gr.update(choices=choices, value=choices, info=info)
 
 
 def browse_scripts_directory(current_dir: str | None) -> str:
@@ -818,7 +846,7 @@ def synthesize_script(
         request_data["speed"] = float(speed_input)
     job_payload = json.dumps(request_data, ensure_ascii=False, sort_keys=True).encode("utf-8")
     job_id = hashlib.sha256(job_payload).hexdigest()[:16]
-    job_dir = JOBS_DIR / job_id
+    job_dir = CACHE_DIR / job_id
     job_dir.mkdir(exist_ok=True)
     combined_path = job_dir / "combined.wav"
     manifest_path = job_dir / "manifest.json"
@@ -956,6 +984,7 @@ def keep_awake():
 def generate_tts_audio(
     text_input: str,
     scripts_dir: str,
+    selected_scripts: list[str] | None,
     language_id: str,
     audio_prompt_path_input: str = None,
     exaggeration_input: float = 0.5,
@@ -970,13 +999,14 @@ def generate_tts_audio(
 
     With text, a combined WAV is produced. With a scripts directory, the block scripts
     {podcast}__{idioma}__c{NN}-b{NN}__{titulo}.txt of each chapter are joined in block order and
-    synthesized in their own language into jobs/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 plus a
-    ch{NN}.json with block timings; the used scripts are then moved to a "processed" subfolder.
+    synthesized in their own language into publish/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 plus a
+    ch{NN}.json with block timings; the used scripts are then moved to processed/{podcast}/{idioma}/ch{NN}/.
     Intermediate WAV files are deleted once the MP3 is written. Interrupted jobs keep their parts.
 
     Args:
         text_input (str): The text to synthesize into speech (maximum 100,000 characters). Leave empty to use scripts_dir.
         scripts_dir (str): Directory containing .txt scripts, used only when text_input is empty.
+        selected_scripts (list[str] | None): Script paths relative to scripts_dir to generate. None generates all of them.
         language_id (str): The language code for synthesis (es, en, fr)
         audio_prompt_path_input (str, optional): File path or URL to the reference audio file that defines the target voice style. Defaults to None.
         exaggeration_input (float, optional): Controls speech expressiveness (0.25-2.0, neutral=0.5, extreme values may be unstable). Defaults to 0.5.
@@ -1009,6 +1039,25 @@ def generate_tts_audio(
     if not chapters:
         raise gr.Error("No hay guiones con formato {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt en el directorio.")
 
+    if selected_scripts is not None:
+        directory = Path(scripts_dir.strip())
+        selected = set(selected_scripts)
+        selected_chapters = {}
+        for key, chapter_scripts in chapters.items():
+            selected_count = sum(
+                str(script_path.relative_to(directory)) in selected for _, script_path in chapter_scripts
+            )
+            if selected_count == len(chapter_scripts):
+                selected_chapters[key] = chapter_scripts
+            elif selected_count:
+                podcast, chapter_language, chapter = key
+                gr.Warning(
+                    f"{podcast}/{chapter_language}/ch{chapter:02d}: solo hay marcados algunos bloques del capítulo; se omite."
+                )
+        chapters = selected_chapters
+        if not chapters:
+            raise gr.Error("No hay ningún capítulo completo seleccionado.")
+
     mp3_paths = []
     for chapter_index, ((podcast, chapter_language, chapter), chapter_scripts) in enumerate(chapters.items(), start=1):
         chapter_name = f"{podcast}/{chapter_language}/ch{chapter:02d}"
@@ -1022,13 +1071,15 @@ def generate_tts_audio(
             gr.Warning(f"{chapter_name}: hay números de bloque repetidos; se omite.")
             continue
 
-        output_dir = JOBS_DIR / podcast / chapter_language / f"ch{chapter:02d}"
+        chapter_relative_dir = Path(podcast, chapter_language, f"ch{chapter:02d}")
+        output_dir = PUBLISH_DIR / chapter_relative_dir
+        processed_dir = Path(scripts_dir.strip()) / PROCESSED_SCRIPTS_DIRNAME / chapter_relative_dir
         mp3_path = output_dir / f"ch{chapter:02d}.mp3"
         json_path = output_dir / f"ch{chapter:02d}.json"
         if mp3_path.is_file() and json_path.is_file():
             print(f"Skipping {chapter_name}: {mp3_path} already exists")
             for script_path in script_paths:
-                move_to_processed(script_path)
+                move_to_processed(script_path, processed_dir)
             mp3_paths.append(str(mp3_path.resolve()))
             continue
 
@@ -1111,7 +1162,7 @@ def generate_tts_audio(
             "chapter": chapter,
             "title": chapter_title,
             "audio": {
-                "r2_key": mp3_path.relative_to(JOBS_DIR).as_posix(),
+                "r2_key": mp3_path.relative_to(PUBLISH_DIR).as_posix(),
                 "duration_sec": round(segments[-1][1]),
                 "bitrate_kbps": MP3_BITRATE_KBPS,
                 "sha256": hashlib.sha256(mp3_path.read_bytes()).hexdigest(),
@@ -1126,8 +1177,8 @@ def generate_tts_audio(
 
         shutil.rmtree(combined_path.parent, ignore_errors=True)
         for script_path in script_paths:
-            move_to_processed(script_path)
-        print(f"Saved {mp3_path} and {json_path.name}; moved scripts to {PROCESSED_SCRIPTS_DIRNAME}/")
+            move_to_processed(script_path, processed_dir)
+        print(f"Saved {mp3_path} and {json_path.name}; moved scripts to {processed_dir}")
         mp3_paths.append(str(mp3_path.resolve()))
 
     progress(1, desc="All scripts complete")
@@ -1153,16 +1204,14 @@ with gr.Blocks() as demo:
             with gr.Row():
                 scripts_dir = gr.Textbox(
                     label="Directorio de guiones (.txt)",
-                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt (sin -b{NN} si el capítulo va en un solo fichero). Cada capítulo genera jobs/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json y los .txt usados van a processed/.",
+                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt (sin -b{NN} si el capítulo va en un solo fichero). Cada capítulo genera publish/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json y los .txt usados van a processed/{podcast}/{idioma}/ch{NN}/.",
                     placeholder="C:\\ruta\\a\\guiones",
                     scale=4,
                 )
                 browse_btn = gr.Button("Examinar...", scale=1)
-            scripts_list = gr.Textbox(
+            scripts_list = gr.CheckboxGroup(
                 label="Guiones encontrados",
-                lines=6,
-                max_lines=15,
-                interactive=False,
+                choices=[],
             )
             browse_btn.click(
                 fn=browse_scripts_directory,
@@ -1232,7 +1281,7 @@ with gr.Blocks() as demo:
                 lines=4,
                 interactive=False,
             )
-            gr.Markdown(f"Los trabajos y fragmentos se guardan en `{JOBS_DIR}`")
+            gr.Markdown(f"Fragmentos temporales en `{CACHE_DIR}`; capítulos listos para publicar en `{PUBLISH_DIR}`")
             gr.Markdown(f"Los jingles y fondos del podcast se leen desde `{PODCAST_MUSIC_DIR}`")
 
         def on_language_change(lang, current_ref, current_text):
@@ -1255,6 +1304,7 @@ with gr.Blocks() as demo:
         inputs=[
             text,
             scripts_dir,
+            scripts_list,
             language_id,
             ref_wav,
             exaggeration,
