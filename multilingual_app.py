@@ -54,9 +54,13 @@ PODCAST_BLOCK_TAGS = (
     "FINAL",
 )
 PODCAST_BLOCK_PATTERN = re.compile(
-    rf"\[({'|'.join(PODCAST_BLOCK_TAGS)})\]",
+    rf"\[({'|'.join(PODCAST_BLOCK_TAGS)}|PREGUNTAS|PREGUNTA_[1-9]\d*|"
+    r"OPCION_CORRECTA_[1-9]\d*|RESPUESTA_[1-9]\d*|INCORRECTO|CORRECTO|"
+    r"ESPERA_[12]|FIN_CAPITULO)\]",
     flags=re.IGNORECASE,
 )
+PODCAST_MIX_VERSION = 4
+FINAL_JINGLE_FILENAME = "jingle2.wav"
 # {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo-en-slug}.txt
 SCRIPT_NAME_PATTERN = re.compile(
     r"^(?P<podcast>.+?)__(?P<language>[a-z]{2})__c(?P<chapter>\d+)(?:-b(?P<block>\d+))?__(?P<slug>.+)$",
@@ -387,6 +391,29 @@ def podcast_block_filename(block: dict[str, str | int], index: int) -> str:
     return f"block-{index:02d}-{tag}-{occurrence:02d}.wav"
 
 
+def split_podcast_blocks(
+    blocks: list[dict[str, str | int]],
+) -> tuple[list[dict[str, str | int]], list[dict[str, str | int]]]:
+    """Keep the quiz out of the theory mix and reject ambiguous quiz filenames."""
+    theory = []
+    quiz = []
+    quiz_tags = set()
+    for block in blocks:
+        tag = str(block["tag"])
+        if tag in PODCAST_BLOCK_TAGS:
+            if quiz:
+                raise gr.Error(f"El bloque [{tag}] no puede aparecer después del quiz.")
+            theory.append(block)
+        else:
+            if not theory or theory[-1]["tag"] != "FINAL":
+                raise gr.Error(f"El bloque [{tag}] debe aparecer después de [FINAL].")
+            if tag in quiz_tags:
+                raise gr.Error(f"Etiqueta de quiz repetida: [{tag}].")
+            quiz_tags.add(tag)
+            quiz.append(block)
+    return theory, quiz
+
+
 def podcast_background_filename(block: dict[str, str | int]) -> str | None:
     tag = block["tag"]
     if tag == "INTRO_CAPITULO":
@@ -416,7 +443,7 @@ def podcast_transition_filename(
     if transition in (("INTRO_CAPITULO", "SECCION"), ("SECCION", "SECCION")):
         return "jingle3.wav"
     if transition == ("SECCION", "FINAL"):
-        return "jingle2.wav"
+        return FINAL_JINGLE_FILENAME
     return None
 
 
@@ -431,6 +458,8 @@ def required_podcast_assets(blocks: list[dict[str, str | int]]) -> set[str]:
         for current_block, next_block in zip(blocks, blocks[1:])
         if (filename := podcast_transition_filename(current_block, next_block))
     )
+    if blocks and blocks[-1]["tag"] == "FINAL":
+        assets.add(FINAL_JINGLE_FILENAME)
     return assets
 
 
@@ -554,6 +583,11 @@ def mix_podcast_blocks(
         block_ranges.append((cursor, cursor + next_audio.shape[-1]))
         cursor += next_audio.shape[-1]
 
+    if blocks[-1]["tag"] == "FINAL":
+        closing_jingle = as_stereo(load_audio(PODCAST_MUSIC_DIR / FINAL_JINGLE_FILENAME, sample_rate))
+        mixed_parts.append(closing_jingle)
+        block_ranges[-1] = (block_ranges[-1][0], cursor + closing_jingle.shape[-1])
+
     temporary_output_path = output_path.with_suffix(".tmp.wav")
     ta.save(str(temporary_output_path), torch.cat(mixed_parts, dim=-1), sample_rate)
     temporary_output_path.replace(output_path)
@@ -622,6 +656,17 @@ def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate_kbps: int = MP3_B
     temporary_mp3_path = mp3_path.with_suffix(".tmp.mp3")
     temporary_mp3_path.write_bytes(mp3_data)
     temporary_mp3_path.replace(mp3_path)
+
+
+def export_quiz_audio(manifest: dict, output_dir: Path) -> list[dict[str, str]]:
+    outputs = []
+    for block in manifest.get("quiz_outputs", []):
+        quiz_dir = output_dir / "quiz"
+        quiz_dir.mkdir(parents=True, exist_ok=True)
+        mp3_path = quiz_dir / f"{block['tag'].lower()}.mp3"
+        convert_wav_to_mp3(Path(block["path"]), mp3_path)
+        outputs.append({"tag": block["tag"], "path": str(mp3_path.resolve())})
+    return outputs
 
 
 def list_script_files(scripts_dir: str | None) -> list[Path]:
@@ -778,6 +823,7 @@ def synthesize_script(
         raise gr.Error("Place the first podcast tag before any text to avoid losing content.")
 
     podcast_blocks = parse_podcast_blocks(text_input)
+    theory_blocks, quiz_blocks = split_podcast_blocks(podcast_blocks)
     empty_blocks = [str(block["tag"]) for block in podcast_blocks if not block["text"]]
     if empty_blocks:
         raise gr.Error(f"Podcast blocks without text: {', '.join(empty_blocks)}")
@@ -799,7 +845,7 @@ def synthesize_script(
     if not work_items:
         raise gr.Error("Enter some text to synthesize.")
 
-    required_assets = required_podcast_assets(podcast_blocks)
+    required_assets = required_podcast_assets(theory_blocks)
     missing_assets = sorted(
         filename
         for filename in required_assets
@@ -838,7 +884,7 @@ def synthesize_script(
         "t3_model": LANGUAGE_MODELS[language_id]["key"],
         "chunks": [item["text"] for item in work_items],
         "podcast_blocks": podcast_blocks,
-        "podcast_mix_version": 3 if podcast_blocks else 1,
+        "podcast_mix_version": PODCAST_MIX_VERSION if podcast_blocks else 1,
         "music_assets": music_assets,
     }
     # Only included when changed so existing jobs keep their hash and cached chunks.
@@ -858,6 +904,8 @@ def synthesize_script(
         combined_path.is_file()
         and (not podcast_blocks or "segments_sec" in previous_manifest)
         and previous_manifest.get("voice_target_dbfs") == VOICE_TARGET_DBFS
+        and len(previous_manifest.get("quiz_outputs", [])) == len(quiz_blocks)
+        and all(Path(output["path"]).is_file() for output in previous_manifest.get("quiz_outputs", []))
     ):
         progress(1, desc=f"{progress_prefix}Recovered completed audio")
         print(f"Recovered completed job {job_id}: {combined_path}")
@@ -943,12 +991,18 @@ def synthesize_script(
             block_chunk_paths = chunk_paths[first_chunk_index:first_chunk_index + len(chunks)]
             concatenate_audio_files(block_chunk_paths, block_path, current_model.sr)
             block_paths.append(block_path)
-        block_ranges = mix_podcast_blocks(podcast_blocks, block_paths, combined_path, current_model.sr)
+        block_ranges = mix_podcast_blocks(
+            theory_blocks, block_paths[:len(theory_blocks)], combined_path, current_model.sr
+        )
         manifest["segments_sec"] = [
             [start / current_model.sr, end / current_model.sr]
             for start, end in block_ranges
         ]
         manifest["block_outputs"] = [str(path.resolve()) for path in block_paths]
+        manifest["quiz_outputs"] = [
+            {"tag": str(block["tag"]), "path": str(path.resolve())}
+            for block, path in zip(quiz_blocks, block_paths[len(theory_blocks):])
+        ]
     else:
         concatenate_audio_files(chunk_paths, combined_path, current_model.sr)
     manifest["voice_target_dbfs"] = VOICE_TARGET_DBFS
@@ -1000,7 +1054,8 @@ def generate_tts_audio(
     With text, a combined WAV is produced. With a scripts directory, the block scripts
     {podcast}__{idioma}__c{NN}-b{NN}__{titulo}.txt of each chapter are joined in block order and
     synthesized in their own language into publish/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 plus a
-    ch{NN}.json with block timings; the used scripts are then moved to processed/{podcast}/{idioma}/ch{NN}/.
+    ch{NN}.json with block timings and voice-only quiz/*.mp3; the used scripts are then
+    moved to processed/{podcast}/{idioma}/ch{NN}/.
     Intermediate WAV files are deleted once the MP3 is written. Interrupted jobs keep their parts.
 
     Args:
@@ -1029,7 +1084,11 @@ def generate_tts_audio(
     )
     if text_input and text_input.strip():
         combined_path = synthesize_script(text_input, *generation_args, progress=progress)
-        return str(combined_path), ""
+        manifest = load_json(combined_path.parent / "manifest.json")
+        if manifest is None:
+            raise gr.Error(f"No se puede leer el manifiesto de audio: {combined_path.parent}")
+        quiz_outputs = export_quiz_audio(manifest, combined_path.parent)
+        return str(combined_path), "\n".join(output["path"] for output in quiz_outputs)
 
     script_files = list_script_files(scripts_dir)
     if not script_files:
@@ -1076,13 +1135,6 @@ def generate_tts_audio(
         processed_dir = Path(scripts_dir.strip()) / PROCESSED_SCRIPTS_DIRNAME / chapter_relative_dir
         mp3_path = output_dir / f"ch{chapter:02d}.mp3"
         json_path = output_dir / f"ch{chapter:02d}.json"
-        if mp3_path.is_file() and json_path.is_file():
-            print(f"Skipping {chapter_name}: {mp3_path} already exists")
-            for script_path in script_paths:
-                move_to_processed(script_path, processed_dir)
-            mp3_paths.append(str(mp3_path.resolve()))
-            continue
-
         script_texts = [read_script_file(script_path) for script_path in script_paths]
         script_tag_blocks = []
         invalid_scripts = []
@@ -1090,9 +1142,33 @@ def generate_tts_audio(
             first_tag = PODCAST_BLOCK_PATTERN.search(script_text)
             if not first_tag or script_text[:first_tag.start()].strip():
                 invalid_scripts.append(script_path.name)
-            script_tag_blocks.append(parse_podcast_blocks(script_text))
+            script_tag_blocks.append([
+                block for block in parse_podcast_blocks(script_text)
+                if block["tag"] in PODCAST_BLOCK_TAGS
+            ])
         if invalid_scripts:
             gr.Warning(f"{chapter_name}: estos guiones deben empezar por una etiqueta de podcast: {', '.join(invalid_scripts)}; se omite.")
+            continue
+
+        _, quiz_blocks = split_podcast_blocks(parse_podcast_blocks("\n\n".join(script_texts)))
+        scripts_digest = hashlib.sha256()
+        for script_path, script_text in zip(script_paths, script_texts):
+            scripts_digest.update(script_path.name.encode("utf-8"))
+            scripts_digest.update(script_text.encode("utf-8"))
+        scripts_hash = scripts_digest.hexdigest()[:12]
+        quiz_paths = [output_dir / "quiz" / f"{str(block['tag']).lower()}.mp3" for block in quiz_blocks]
+        published = load_json(json_path) or {}
+        generated = published.get("generated", {})
+        if (
+            mp3_path.is_file()
+            and generated.get("podcast_mix_version") == PODCAST_MIX_VERSION
+            and generated.get("scripts_hash") == scripts_hash
+            and all(path.is_file() for path in quiz_paths)
+        ):
+            print(f"Skipping {chapter_name}: all audio outputs already exist")
+            for script_path in script_paths:
+                move_to_processed(script_path, processed_dir)
+            mp3_paths.extend(str(path.resolve()) for path in [mp3_path, *quiz_paths])
             continue
 
         print(f"Processing chapter {chapter_name}: {', '.join(path.name for path in script_paths)}")
@@ -1104,11 +1180,15 @@ def generate_tts_audio(
             progress_prefix=prefix,
             remember_request=False,
         )
-        segments = load_json(combined_path.parent / "manifest.json")["segments_sec"]
+        manifest = load_json(combined_path.parent / "manifest.json")
+        if manifest is None:
+            raise gr.Error(f"No se puede leer el manifiesto de audio: {combined_path.parent}")
+        segments = manifest["segments_sec"]
 
         progress(1, desc=f"{prefix}Converting to MP3")
         output_dir.mkdir(parents=True, exist_ok=True)
         convert_wav_to_mp3(combined_path, mp3_path)
+        quiz_outputs = export_quiz_audio(manifest, output_dir)
 
         chapter_title = script_block_title(
             [block for tag_blocks in script_tag_blocks for block in tag_blocks],
@@ -1151,11 +1231,6 @@ def generate_tts_audio(
                 "end_sec": round(intro_segments[-1][1]),
             })
 
-        scripts_digest = hashlib.sha256()
-        for script_path, script_text in zip(script_paths, script_texts):
-            scripts_digest.update(script_path.name.encode("utf-8"))
-            scripts_digest.update(script_text.encode("utf-8"))
-
         save_json(json_path, {
             "podcast": podcast,
             "language": chapter_language,
@@ -1168,10 +1243,18 @@ def generate_tts_audio(
                 "sha256": hashlib.sha256(mp3_path.read_bytes()).hexdigest(),
             },
             "blocks": blocks_metadata,
+            "quiz": [
+                {
+                    "tag": output["tag"],
+                    "r2_key": Path(output["path"]).relative_to(PUBLISH_DIR.resolve()).as_posix(),
+                }
+                for output in quiz_outputs
+            ],
             "generated": {
                 "date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "model": t3_model_filename(chapter_language),
-                "scripts_hash": scripts_digest.hexdigest()[:12],
+                "scripts_hash": scripts_hash,
+                "podcast_mix_version": PODCAST_MIX_VERSION,
             },
         })
 
@@ -1180,6 +1263,7 @@ def generate_tts_audio(
             move_to_processed(script_path, processed_dir)
         print(f"Saved {mp3_path} and {json_path.name}; moved scripts to {processed_dir}")
         mp3_paths.append(str(mp3_path.resolve()))
+        mp3_paths.extend(output["path"] for output in quiz_outputs)
 
     progress(1, desc="All scripts complete")
     return gr.update(), "\n".join(mp3_paths)
@@ -1204,7 +1288,7 @@ with gr.Blocks() as demo:
             with gr.Row():
                 scripts_dir = gr.Textbox(
                     label="Directorio de guiones (.txt)",
-                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt (sin -b{NN} si el capítulo va en un solo fichero). Cada capítulo genera publish/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json y los .txt usados van a processed/{podcast}/{idioma}/ch{NN}/.",
+                    info="Se usa solo si el cuadro de texto está vacío. Formato: {podcast}__{idioma}__c{NN}[-b{NN}]__{titulo}.txt (sin -b{NN} si el capítulo va en un solo fichero). Cada capítulo genera publish/{podcast}/{idioma}/ch{NN}/ch{NN}.mp3 + .json, y quiz/*.mp3 de voz sin música. Los .txt usados van a processed/{podcast}/{idioma}/ch{NN}/.",
                     placeholder="C:\\ruta\\a\\guiones",
                     scale=4,
                 )
@@ -1277,7 +1361,7 @@ with gr.Blocks() as demo:
                 format="wav",
             )
             mp3_output = gr.Textbox(
-                label="MP3 generados desde el directorio",
+                label="MP3 generados (capítulos y quiz)",
                 lines=4,
                 interactive=False,
             )
