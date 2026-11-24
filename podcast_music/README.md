@@ -136,10 +136,96 @@ published. After success, sources move to
 back into the input directory and choose the intended/new version.
 Older unversioned outputs are left untouched.
 
-There is **no R2 upload implementation** in this project. `r2_key` is a relative
-object key for a future publisher; no credentials or local reference paths go
-into the chapter manifest. The local version protections do not replace R2
-conditional uploads if uploading is added later.
+### Upload chapter audio to Cloudflare R2
+
+After generation, run [podcast_r2.py](../podcast_r2.py) from the repository root.
+It uploads **only** `audio.r2_key` and every `quiz[].r2_key`, including
+`OPCION_CORRECTA_N`. An empty or absent `quiz` is supported. It never uploads the
+JSON manifest, WAVs, sources, or unreferenced MP3s. Keys and versions are used
+exactly as written, without adding the bucket name or any prefix.
+
+Install the declared upload dependencies in your existing environment:
+
+```powershell
+python -m pip install "boto3>=1.40,<2" "python-dotenv>=1.0,<2"
+```
+
+Configure these environment variables using your secret manager, local shell,
+or a local `.env` file next to `podcast_r2.py` in the repository root.
+The uploader loads that file automatically with `python-dotenv`; existing
+environment variables take precedence, and the file is optional.
+Never put credentials in manifests, scripts, or source control:
+
+| Variable | Value |
+| --- | --- |
+| `R2_ACCOUNT_ID` | Cloudflare account ID (32 hexadecimal characters) |
+| `R2_BUCKET_AUDIO` | Existing **private** bucket name, without URL or prefix |
+| `R2_UPLOAD_ACCESS_KEY_ID` | R2 S3 upload access key ID |
+| `R2_UPLOAD_SECRET_ACCESS_KEY` | R2 S3 upload secret |
+
+To configure a local file, copy the template and fill in its four values:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+`.env` and `.env.*` are ignored by Git; only the empty
+[.env.example](../.env.example) template is tracked. Keep the local file private.
+
+Use a bucket-scoped token with object read/write permissions (HEAD, PUT and
+multipart upload/abort). The uploader does not create buckets, change their
+privacy settings, or send an ACL. It uses
+`https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com`, region `auto`, and verified TLS.
+
+```powershell
+python podcast_r2.py "publish\clode-en-route\fr\ch02\v1\ch02.json"
+
+# Multiple chapters reuse the same client and validation/upload logic.
+python podcast_r2.py "publish\clode-en-route\fr\ch02\v1\ch02.json" "publish\clode-en-route\fr\ch03\v1\ch03.json"
+```
+
+The local layout is the generator's publication directory: the main `chNN.mp3`
+is next to `chNN.json`; quiz MP3s are in its `quiz` subdirectory. The directory
+can be relocated as a unit: an R2 key is **not** interpreted as a local path.
+All references, safe paths, compatible duplicate keys, file existence and the
+main audio's full SHA-256 are checked before any upload for that manifest.
+Files are snapshotted to temporary disk storage and hashed before network
+access, so later local edits cannot invalidate the uploaded hashes. Allow
+temporary disk space for all referenced audio in one chapter; snapshots are
+removed after processing.
+
+Every object has `Content-Type: audio/mpeg` and `sha256` custom metadata.
+Existing objects are skipped only when both that metadata and the byte length
+match. Different or unverifiable content is a conflict: generate a **new version
+path**; there is no force-overwrite option. ETags are not treated as SHA-256.
+Uploads use atomic `If-None-Match: *` conditions, including at multipart
+completion, protecting against concurrent writers. See
+[R2 conditional operations](https://developers.cloudflare.com/r2/api/s3/conditional-operations/).
+The uploader checks that the installed SDK exposes these conditions and fails
+closed otherwise. Audio is streamed from disk; files of 64 MiB or more use
+bounded multipart chunks. Failed multipart uploads are aborted where possible;
+an abort failure is reported so incomplete uploads can be cleaned up.
+
+Transient requests have at most four SDK attempts with standard backoff.
+Credential, permission, connection/TLS, local-file and conflict errors are
+reported separately without printing raw server errors, headers or secrets.
+Authentication redirects and HTML gateways (including Zscaler) are blocked,
+not followed; resolve proxy/certificate/access issues rather than disabling TLS.
+
+Each manifest gets counts of uploaded, already-existing and failed objects,
+manifest-level errors, and `listo para importar en Sabia=SI/NO`. Invalid local
+manifests make no uploads. Partial failures keep successfully uploaded objects:
+run the same command again to resume idempotently. The command exits nonzero
+if any chapter is not ready, but still processes the other requested manifests.
+Only after `SI`, manually select the **local JSON manifest** in Sabia's web
+administrator. No manifest upload or automatic Sabia import is performed.
+
+Upload tests use offline stores and mocked SDK HTTP responses; they never
+contact a real bucket:
+
+```powershell
+python -m unittest discover -s tests -p test_podcast_r2.py -v
+```
 
 ### Commands
 

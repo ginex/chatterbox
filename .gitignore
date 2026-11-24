@@ -1,5 +1,10 @@
 .vscode
 
+# Local environment credentials
+.env
+.env.*
+!.env.example
+
 # Pylance
 pyrightconfig.json
 
