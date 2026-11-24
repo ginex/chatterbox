@@ -29,6 +29,7 @@ dependencies = [
     "gradio==6.8.0",
     "pyloudnorm",
     "lameenc",
+    "mutagen>=1.47,<2",
     "omegaconf"
 ]
 

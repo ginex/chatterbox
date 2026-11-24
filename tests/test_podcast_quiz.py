@@ -9,7 +9,9 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
+
+import podcast_manifest
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "multilingual_app.py"
@@ -34,7 +36,9 @@ def load_audio_helpers():
     }
     nodes = []
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
+        if isinstance(node, ast.ImportFrom) and node.module == "podcast_manifest":
+            nodes.append(node)
+        elif isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Name) and target.id in constants for target in node.targets
         ):
             nodes.append(node)
@@ -46,6 +50,7 @@ def load_audio_helpers():
     namespace = {
         "re": re, "Path": Path, "hashlib": hashlib, "json": json,
         "shutil": shutil, "datetime": datetime, "timezone": timezone, "time": time,
+        "tempfile": tempfile,
         "gr": SimpleNamespace(Error=ValueError, Progress=Mock, Warning=Mock(), update=Mock()),
     }
     exec(compile(module, str(APP_PATH), "exec"), namespace)
@@ -61,7 +66,7 @@ SCRIPT = """[NOMBRE_PODCAST] Podcast
 [PREGUNTA_1] First question? A. One. B. Two.
 [OPCION_CORRECTA_1] A
 [RESPUESTA_1] Explanation one
-[PREGUNTA_12] Another question?
+[PREGUNTA_12] Another question? A) First. C) Third.
 [OPCION_CORRECTA_12] C
 [RESPUESTA_12] Explanation twelve
 [INCORRECTO] Try again
@@ -130,6 +135,13 @@ class PodcastQuizTests(unittest.TestCase):
         self.assertEqual(len(jingle_loads), 2)
         final_only = self.app["parse_podcast_blocks"]("[FINAL] Goodbye")
         self.assertIn("jingle2.wav", self.app["required_podcast_assets"](final_only))
+        self.app["torch"].zeros = Mock(return_value=MagicMock())
+        ranges_with_gap = self.app["mix_podcast_blocks"](
+            blocks, [self.root / "section.wav", self.root / "final.wav"],
+            self.root / "with-gap.wav", 2, gap_sec=0.5,
+        )
+        self.app["torch"].zeros.assert_called_once_with(2, 1)
+        self.assertEqual(ranges_with_gap, [(0, 10), (13, 29)])
 
     def test_synthesis_routes_only_theory_to_mixer_and_keeps_quiz_voice(self):
         self.app.update({
@@ -144,7 +156,7 @@ class PodcastQuizTests(unittest.TestCase):
             "ta": SimpleNamespace(save=Mock(side_effect=lambda path, audio, sr: Path(path).touch())),
         })
 
-        def mix(blocks, paths, output, sr):
+        def mix(blocks, paths, output, sr, gap_sec=0.0):
             output.touch()
             return [(index, index + 1) for index in range(len(blocks))]
 
@@ -171,11 +183,22 @@ class PodcastQuizTests(unittest.TestCase):
         scripts_dir.mkdir()
         script = scripts_dir / "demo__es__c01__chapter.txt"
         script.write_text(SCRIPT, encoding="utf-8")
+        reference = self.root / "voice.wav"
+        reference.write_bytes(b"test reference")
         self.app.update({
             "PUBLISH_DIR": self.root / "publish",
             "LANGUAGE_MODELS": {"es": {"key": "es-es"}},
             "t3_model_filename": lambda language: "model.safetensors",
+            "persist_reference_audio": lambda path: path,
+            "default_audio_for_ui": lambda language: str(reference),
+            "required_podcast_assets": Mock(return_value=set()),
         })
+        metadata_reader = patch.object(podcast_manifest, "mp3_metadata", side_effect=lambda path: {
+            "duration_sec": 50.24, "bitrate_kbps": 192.0,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+        self.app["mp3_metadata"] = metadata_reader.start()
+        self.addCleanup(metadata_reader.stop)
 
         def synthesize(text, *args, **kwargs):
             job_dir = self.root / "job"
@@ -198,22 +221,27 @@ class PodcastQuizTests(unittest.TestCase):
         self.app["convert_wav_to_mp3"] = Mock(side_effect=lambda wav, mp3: mp3.write_bytes(wav.read_bytes()))
         return scripts_dir, script
 
-    def test_publishing_outputs_metadata_and_repairs_missing_quiz_files(self):
+    def test_publishing_outputs_metadata_and_protects_existing_versions(self):
         scripts_dir, script = self.configure_publisher()
         publish = self.app["generate_tts_audio"]
         _, result = publish("", str(scripts_dir), None, "es")
-        chapter_dir = self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01"
+        chapter_dir = self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01" / "v1"
         metadata = self.app["load_json"](chapter_dir / "ch01.json")
         self.assertEqual(len(result.splitlines()), 13)
         self.assertEqual(len(metadata["quiz"]), 12)
-        self.assertEqual(len(metadata["blocks"]), 3)
-        self.assertEqual(metadata["audio"]["duration_sec"], 50)
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertEqual([block["order"] for block in metadata["blocks"]], [1, 2, 3, 4, 5])
+        self.assertEqual(metadata["audio"]["duration_sec"], 50.24)
+        self.assertEqual(len(metadata["generated"]["scripts_hash"]), 64)
+        self.assertEqual(metadata["generated"]["voice"], podcast_manifest.reference_voice_id(str(self.root / "voice.wav")))
+        self.assertEqual(metadata["quiz"][1]["option_letters"], ["A", "B"])
+        self.assertEqual(metadata["quiz"][2]["correct_option"], "A")
         for entry in metadata["quiz"]:
             self.assertTrue((self.app["PUBLISH_DIR"] / entry["r2_key"]).is_file())
             self.assertEqual(Path(entry["r2_key"]).stem, entry["tag"].lower())
         self.assertEqual((chapter_dir / "quiz" / "opcion_correcta_1.mp3").read_bytes(), b"A")
         self.assertEqual((chapter_dir / "quiz" / "fin_capitulo.mp3").read_bytes(), b"The end")
-        processed = scripts_dir / "processed" / "demo" / "es" / "ch01" / script.name
+        processed = scripts_dir / "processed" / "demo" / "es" / "ch01" / "v1" / script.name
         self.assertTrue(processed.is_file())
         self.assertFalse((self.root / "job").exists())
 
@@ -223,9 +251,13 @@ class PodcastQuizTests(unittest.TestCase):
 
         processed.replace(script)
         (chapter_dir / "quiz" / "pregunta_12.mp3").unlink()
-        publish("", str(scripts_dir), None, "es")
+        with self.assertRaisesRegex(ValueError, "Selecciona una version nueva"):
+            publish("", str(scripts_dir), None, "es")
+        self.assertEqual(self.app["synthesize_script"].call_count, 1)
+        publish("", str(scripts_dir), None, "es", version_input=2)
         self.assertEqual(self.app["synthesize_script"].call_count, 2)
-        self.assertTrue((chapter_dir / "quiz" / "pregunta_12.mp3").is_file())
+        self.assertTrue((chapter_dir.parent / "v2" / "quiz" / "pregunta_12.mp3").is_file())
+        self.assertFalse((chapter_dir / "quiz" / "pregunta_12.mp3").exists())
 
     def test_export_failure_keeps_scripts_and_cached_audio_for_retry(self):
         scripts_dir, script = self.configure_publisher()
@@ -252,9 +284,9 @@ class PodcastQuizTests(unittest.TestCase):
             path = scripts_dir / f"demo__es__c01-b{index:02d}__block.txt"
             path.write_text(content, encoding="utf-8")
         self.app["generate_tts_audio"]("", str(scripts_dir), None, "es")
-        metadata = self.app["load_json"](self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01" / "ch01.json")
-        self.assertEqual(len(metadata["blocks"]), 2)
-        self.assertEqual(metadata["blocks"][-1]["start_sec"], 30)
+        metadata = self.app["load_json"](self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01" / "v1" / "ch01.json")
+        self.assertEqual(len(metadata["blocks"]), 5)
+        self.assertEqual(metadata["blocks"][-1]["start_sec"], 40)
         self.assertEqual(metadata["blocks"][-1]["end_sec"], 50)
         self.assertEqual(len(metadata["quiz"]), 12)
 
@@ -266,6 +298,39 @@ class PodcastQuizTests(unittest.TestCase):
         self.assertEqual(len(outputs), 12)
         self.assertTrue(all(path.parent == Path(combined).parent / "quiz" for path in outputs))
         self.assertTrue((Path(combined).parent / "manifest.json").is_file())
+
+    def test_changed_voice_or_settings_cannot_overwrite_same_version(self):
+        scripts_dir, script = self.configure_publisher()
+        publish = self.app["generate_tts_audio"]
+        publish("", str(scripts_dir), None, "es")
+        processed = scripts_dir / "processed" / "demo" / "es" / "ch01" / "v1" / script.name
+        processed.replace(script)
+        for kwargs in ({"speed_input": 1.1}, {"gap_sec_input": 0.5}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "otra configuracion"):
+                publish("", str(scripts_dir), None, "es", **kwargs)
+        self.app["t3_model_filename"] = lambda language: "different-model.safetensors"
+        with self.assertRaisesRegex(ValueError, "otra configuracion"):
+            publish("", str(scripts_dir), None, "es")
+        self.app["t3_model_filename"] = lambda language: "model.safetensors"
+        self.app["PODCAST_MIX_VERSION"] += 1
+        with self.assertRaisesRegex(ValueError, "otra configuracion"):
+            publish("", str(scripts_dir), None, "es")
+        self.app["PODCAST_MIX_VERSION"] -= 1
+        (self.root / "voice.wav").write_bytes(b"different voice")
+        with self.assertRaisesRegex(ValueError, "otra configuracion"):
+            publish("", str(scripts_dir), None, "es")
+        self.assertTrue(script.is_file())
+        self.assertEqual(self.app["synthesize_script"].call_count, 1)
+
+    def test_publication_requires_real_reference_and_chapter_title(self):
+        scripts_dir, script = self.configure_publisher()
+        self.app["default_audio_for_ui"] = lambda language: None
+        with self.assertRaisesRegex(ValueError, "Falta la voz"):
+            self.app["generate_tts_audio"]("", str(scripts_dir), None, "es")
+        script.write_text(SCRIPT.replace("[NOMBRE_CAPITULO] Chapter\n", ""), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "falta el titulo"):
+            self.app["generate_tts_audio"]("", str(scripts_dir), None, "es")
+        self.app["synthesize_script"].assert_not_called()
 
 
 if __name__ == "__main__":
