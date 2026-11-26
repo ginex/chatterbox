@@ -322,6 +322,50 @@ def upload_manifest(manifest_path: Path, client, bucket: str) -> UploadSummary:
     return summary
 
 
+def format_summary(result: UploadSummary) -> str:
+    lines = [
+        f"{result.manifest.name}: subidos={len(result.uploaded)}, ya existentes={len(result.existing)}, "
+        f"fallidos={len(result.failed)}, errores_manifest={len(result.errors)}, "
+        f"listo para importar en Sabia={'SI' if result.ready else 'NO'}",
+    ]
+    lines += [f"  {key}: {message}" for key, message in result.failed.items()]
+    lines += [f"  Validacion/manifest fallido: {message}" for message in result.errors]
+    return "\n".join(lines)
+
+
+def discover_manifests(publish_dir: Path) -> dict[str, Path]:
+    """Map 'podcast/lang/chNN/vN/chNN.json' labels to published manifests."""
+    root = Path(publish_dir).resolve()
+    found = {}
+    for path in sorted(root.glob("*/*/ch*/v*/ch*.json")):
+        if path.is_file() and re.fullmatch(r"ch\d+\.json", path.name):
+            found[path.relative_to(root).as_posix()] = path
+    return found
+
+
+def upload_selected(selected: list[str], publish_dir: Path) -> str:
+    """Upload only manifests discovered under publish_dir (used by the Gradio button)."""
+    if not selected:
+        return "Selecciona al menos un capitulo."
+    available = discover_manifests(publish_dir)
+    if any(label not in available for label in selected):
+        return "Seleccion no valida; actualiza la lista de capitulos."
+    try:
+        client, bucket = create_r2_client()
+    except UploadError as error:
+        return f"{error.category}: {error}"
+    except (BotoCoreError, ClientError) as error:
+        safe = _remote_error(error)
+        return f"{safe.category}: {safe}"
+    try:
+        summaries = [upload_manifest(available[label], client, bucket) for label in selected]
+    finally:
+        client.close()
+    return "\n\n".join(
+        f"{label}\n{format_summary(summary)}" for label, summary in zip(selected, summaries)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifests", nargs="+", type=Path, help="Manifests locales chNN.json (no se suben).")
@@ -339,15 +383,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for manifest in args.manifests:
             result = upload_manifest(manifest, client, bucket)
-            print(
-                f"{manifest.name}: subidos={len(result.uploaded)}, ya existentes={len(result.existing)}, "
-                f"fallidos={len(result.failed)}, errores_manifest={len(result.errors)}, "
-                f"listo para importar en Sabia={'SI' if result.ready else 'NO'}",
-            )
-            for key, message in result.failed.items():
-                print(f"  {key}: {message}")
-            for message in result.errors:
-                print(f"  Validacion/manifest fallido: {message}")
+            print(format_summary(result))
             success = success and result.ready
     finally:
         client.close()

@@ -357,6 +357,31 @@ class RawResponse:
         yield self.body
 
 
+class GradioSelectionTests(R2ManifestTests):
+    def test_discovers_only_published_manifests_and_uploads_selection(self):
+        publish = self.directory.parent / "publish"
+        chapter = publish / "clode-en-route" / "fr" / "ch02" / "v1"
+        chapter.parent.mkdir(parents=True)
+        self.directory.rename(chapter)
+        (chapter / "chapter.json").write_text("{}", encoding="utf-8")
+        self.directory = chapter
+        self.path = chapter / "ch02.json"
+        self.save()
+        label = "clode-en-route/fr/ch02/v1/ch02.json"
+        self.assertEqual(list(podcast_r2.discover_manifests(publish)), [label])
+        with patch.object(podcast_r2, "create_r2_client", return_value=(self.store, "private-audio")):
+            report = podcast_r2.upload_selected([label], publish)
+            self.assertIn("subidos=1", report)
+            self.assertIn("Sabia=SI", report)
+            self.assertIn("no valida", podcast_r2.upload_selected(["../outside.json"], publish))
+        self.assertEqual(set(self.store.objects), {self.key})
+        self.assertIn("al menos", podcast_r2.upload_selected([], publish))
+
+
+for _inherited in [name for name in dir(R2ManifestTests) if name.startswith("test_")]:
+    setattr(GradioSelectionTests, _inherited, None)  # reuse setUp/helpers only
+
+
 class R2TransportTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

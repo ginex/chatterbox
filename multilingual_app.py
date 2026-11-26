@@ -16,6 +16,7 @@ import torchaudio as ta
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS, MULTILINGUAL_T3_MODELS
 from chatterbox.tts import ChatterboxTTS
 import gradio as gr
+from podcast_r2 import discover_manifests, upload_selected
 from podcast_manifest import (
     build_chapter_manifest,
     chapter_prefix,
@@ -48,7 +49,7 @@ MODEL = None
 LOADED_MODEL_KEY = None
 APP_DATA_DIR = Path(__file__).resolve().parent / "chatterbox_output"
 CACHE_DIR = APP_DATA_DIR / "cache"
-# Mirrors the R2 key layout; publication is local, with no R2 uploads.
+# Mirrors the R2 key layout; chapters are uploaded to R2 only on request.
 PUBLISH_DIR = APP_DATA_DIR / "publish"
 REFERENCE_DIR = APP_DATA_DIR / "reference"
 PODCAST_MUSIC_DIR = Path(__file__).resolve().parent / "podcast_music"
@@ -1429,6 +1430,19 @@ with gr.Blocks() as demo:
                 interactive=False,
             )
             gr.Markdown(f"Fragmentos temporales en `{CACHE_DIR}`; capítulos listos para publicar en `{PUBLISH_DIR}`")
+            with gr.Accordion("Subir a Cloudflare R2", open=False):
+                gr.Markdown(
+                    "Sube el MP3 y los segmentos de quiz de los capítulos marcados "
+                    "(nunca el manifest). Requiere el `.env` con las variables R2."
+                )
+                r2_chapters = gr.CheckboxGroup(
+                    choices=list(discover_manifests(PUBLISH_DIR)),
+                    label="Capítulos generados",
+                )
+                with gr.Row():
+                    r2_refresh_btn = gr.Button("Actualizar lista")
+                    r2_upload_btn = gr.Button("Subir seleccionados a R2", variant="primary")
+                r2_result = gr.Textbox(label="Resultado de la subida", lines=6, interactive=False)
             gr.Markdown(f"Los jingles y fondos del podcast se leen desde `{PODCAST_MUSIC_DIR}`")
 
         def on_language_change(lang, current_ref, current_text):
@@ -1445,6 +1459,18 @@ with gr.Blocks() as demo:
             outputs=[ref_wav, text, model_status],
             show_progress="full"
         )
+
+    def refresh_r2_chapters(selected):
+        choices = list(discover_manifests(PUBLISH_DIR))
+        return gr.update(choices=choices, value=[label for label in selected or [] if label in choices])
+
+    r2_refresh_btn.click(refresh_r2_chapters, inputs=[r2_chapters], outputs=[r2_chapters], show_progress=False)
+    r2_upload_btn.click(
+        fn=lambda selected: upload_selected(selected or [], PUBLISH_DIR),
+        inputs=[r2_chapters],
+        outputs=[r2_result],
+        show_progress="full",
+    )
 
     run_btn.click(
         fn=generate_tts_audio,
@@ -1467,6 +1493,11 @@ with gr.Blocks() as demo:
         fn=describe_script_files,
         inputs=[scripts_dir],
         outputs=[scripts_list],
+        show_progress=False,
+    ).then(
+        fn=refresh_r2_chapters,
+        inputs=[r2_chapters],
+        outputs=[r2_chapters],
         show_progress=False,
     )
 
