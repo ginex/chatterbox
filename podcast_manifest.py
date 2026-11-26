@@ -70,7 +70,8 @@ def chapter_prefix(podcast: str, language: str, chapter: int, version: int) -> s
 
 
 def quiz_question_numbers(tags: set[str]) -> set[str]:
-    shared = {"PREGUNTAS", "INCORRECTO", "CORRECTO", "ESPERA_1", "ESPERA_2", "FIN_CAPITULO"}
+    shared = {"PREGUNTAS", "INCORRECTO", "CORRECTO", "ESPERA_1", "ESPERA_2", "FIN_PREGUNTAS"}
+    tags = tags - {"CONTINUAR"}  # opcional
     questions = {
         tag.removeprefix("PREGUNTA_")
         for tag in tags if re.fullmatch(r"PREGUNTA_[1-9]\d*", tag)

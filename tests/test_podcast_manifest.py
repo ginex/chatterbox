@@ -59,7 +59,7 @@ class ChapterManifestTests(unittest.TestCase):
             "CORRECTO": "Correct.",
             "ESPERA_1": "Still waiting.",
             "ESPERA_2": "Your answer?",
-            "FIN_CAPITULO": "End.",
+            "FIN_PREGUNTAS": "End.",
         }
         self.quiz_blocks = [{"tag": tag, "text": text} for tag, text in texts.items()]
 

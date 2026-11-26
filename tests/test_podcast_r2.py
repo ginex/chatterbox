@@ -112,7 +112,7 @@ class R2ManifestTests(unittest.TestCase):
     def add_quiz(self):
         tags = (
             "PREGUNTAS", "PREGUNTA_1", "OPCION_CORRECTA_1", "RESPUESTA_1", "CORRECTO",
-            "INCORRECTO", "ESPERA_1", "ESPERA_2", "FIN_CAPITULO",
+            "INCORRECTO", "ESPERA_1", "ESPERA_2", "FIN_PREGUNTAS",
         )
         (self.directory / "quiz").mkdir(exist_ok=True)
         for tag in tags:

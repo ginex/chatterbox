@@ -24,7 +24,7 @@ to close the theory audio. Its duration is included in the final block's timing.
 
 Scripts may continue after `[FINAL]` with `[PREGUNTAS]`, numbered
 `[PREGUNTA_N]`, `[OPCION_CORRECTA_N]`, `[RESPUESTA_N]`, and the shared
-`[INCORRECTO]`, `[CORRECTO]`, `[ESPERA_1]`, `[ESPERA_2]`, `[FIN_CAPITULO]`
+`[INCORRECTO]`, `[CORRECTO]`, `[ESPERA_1]`, `[ESPERA_2]`, `[FIN_PREGUNTAS]`
 blocks. Question numbers are positive integers and are not limited to two
 questions. Each quiz tag must be unique within a chapter and contain text.
 `[OPCION_CORRECTA_N]` contains the answer letter, which is also synthesized.
@@ -44,7 +44,7 @@ those actual labels in source order; it never assumes four alternatives.
 `OPCION_CORRECTA_N` must contain exactly one of those letters (case-insensitive);
 it becomes uppercase `correct_option` in the manifest. Each question must have
 its matching correct-option and explanation blocks. When a quiz is present,
-all five shared segments and `FIN_CAPITULO` are required (the shared segments are
+all five shared segments and `FIN_PREGUNTAS` are required (the shared segments are
 `PREGUNTAS`, `INCORRECTO`, `CORRECTO`, `ESPERA_1`, `ESPERA_2`).
 
 The correct-option MP3 is still generated for compatibility, but is not part of

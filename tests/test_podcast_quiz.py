@@ -73,7 +73,8 @@ SCRIPT = """[NOMBRE_PODCAST] Podcast
 [CORRECTO] Well done
 [ESPERA_1] Still waiting
 [ESPERA_2] Answer now
-[FIN_CAPITULO] The end
+[CONTINUAR] Let us continue
+[FIN_PREGUNTAS] The end
 """
 
 
@@ -89,10 +90,11 @@ class PodcastQuizTests(unittest.TestCase):
         theory, quiz = self.app["split_podcast_blocks"](blocks)
         self.assertEqual(len(theory), 5)
         self.assertEqual(theory[-1]["text"], "goodbye")
-        self.assertEqual(len(quiz), 12)
+        self.assertEqual(len(quiz), 13)
         self.assertEqual(quiz[2]["text"], "a")
         self.assertEqual(quiz[4]["tag"], "PREGUNTA_12")
-        self.assertEqual(quiz[-1]["tag"], "FIN_CAPITULO")
+        self.assertEqual(quiz[-2]["tag"], "CONTINUAR")
+        self.assertEqual(quiz[-1]["tag"], "FIN_PREGUNTAS")
         legacy = self.app["parse_podcast_blocks"](SCRIPT.split("[PREGUNTAS]")[0])
         self.assertEqual(self.app["split_podcast_blocks"](legacy), (legacy, []))
 
@@ -168,9 +170,9 @@ class PodcastQuizTests(unittest.TestCase):
         self.assertEqual(len(mixed_paths), 5)
         manifest = self.app["load_json"](combined.parent / "manifest.json")
         self.assertEqual(len(manifest["segments_sec"]), 5)
-        self.assertEqual(len(manifest["quiz_outputs"]), 12)
+        self.assertEqual(len(manifest["quiz_outputs"]), 13)
         self.assertTrue(all(Path(output["path"]).is_file() for output in manifest["quiz_outputs"]))
-        self.assertEqual(self.app["get_or_load_model"].return_value.generate.call_count, 17)
+        self.assertEqual(self.app["get_or_load_model"].return_value.generate.call_count, 18)
         # A missing quiz WAV must prevent recovery of a supposedly complete job.
         Path(manifest["quiz_outputs"][0]["path"]).unlink()
         self.app["ta"].load = Mock(return_value=(None, 24000))
@@ -227,8 +229,8 @@ class PodcastQuizTests(unittest.TestCase):
         _, result = publish("", str(scripts_dir), None, "es")
         chapter_dir = self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01" / "v1"
         metadata = self.app["load_json"](chapter_dir / "ch01.json")
-        self.assertEqual(len(result.splitlines()), 13)
-        self.assertEqual(len(metadata["quiz"]), 12)
+        self.assertEqual(len(result.splitlines()), 14)
+        self.assertEqual(len(metadata["quiz"]), 13)
         self.assertEqual(metadata["schema_version"], 1)
         self.assertEqual([block["order"] for block in metadata["blocks"]], [1, 2, 3])
         self.assertEqual(metadata["blocks"][0]["title"], "Intro")
@@ -245,7 +247,7 @@ class PodcastQuizTests(unittest.TestCase):
             self.assertTrue((self.app["PUBLISH_DIR"] / entry["r2_key"]).is_file())
             self.assertEqual(Path(entry["r2_key"]).stem, entry["tag"].lower())
         self.assertEqual((chapter_dir / "quiz" / "opcion_correcta_1.mp3").read_bytes(), b"A")
-        self.assertEqual((chapter_dir / "quiz" / "fin_capitulo.mp3").read_bytes(), b"The end")
+        self.assertEqual((chapter_dir / "quiz" / "fin_preguntas.mp3").read_bytes(), b"The end")
         processed = scripts_dir / "processed" / "demo" / "es" / "ch01" / "v1" / script.name
         self.assertTrue(processed.is_file())
         self.assertFalse((self.root / "job").exists())
@@ -294,14 +296,14 @@ class PodcastQuizTests(unittest.TestCase):
         self.assertEqual(metadata["blocks"][0]["end_sec"], 30)
         self.assertEqual(metadata["blocks"][-1]["start_sec"], 40)
         self.assertEqual(metadata["blocks"][-1]["end_sec"], 50)
-        self.assertEqual(len(metadata["quiz"]), 12)
+        self.assertEqual(len(metadata["quiz"]), 13)
 
     def test_text_mode_exports_quiz_but_preserves_theory_wav(self):
         self.configure_publisher()
         combined, result = self.app["generate_tts_audio"](SCRIPT, "", None, "es")
         self.assertEqual(Path(combined).read_bytes(), b"theory")
         outputs = [Path(path) for path in result.splitlines()]
-        self.assertEqual(len(outputs), 12)
+        self.assertEqual(len(outputs), 13)
         self.assertTrue(all(path.parent == Path(combined).parent / "quiz" for path in outputs))
         self.assertTrue((Path(combined).parent / "manifest.json").is_file())
 
