@@ -1273,6 +1273,7 @@ def generate_tts_audio(
         segments = manifest["segments_sec"]
 
         blocks_metadata = []
+        intro_open = False
         segment_index = 0
         if len(segments) != sum(len(blocks) for blocks in script_tag_blocks):
             raise gr.Error(f"{chapter_name}: los tiempos no corresponden a los bloques de teoria.")
@@ -1280,9 +1281,19 @@ def generate_tts_audio(
             file_segments = segments[segment_index:segment_index + len(tag_blocks)]
             segment_index += len(tag_blocks)
             for tag_block, segment in zip(tag_blocks, file_segments):
+                if tag_block["tag"] in INTRO_TAGS:
+                    # Podcast title, chapter title and chapter intro form one intro block.
+                    if blocks_metadata and intro_open:
+                        blocks_metadata[-1]["end_sec"] = segment[1]
+                        continue
+                    title = "Intro"
+                    intro_open = True
+                else:
+                    title = clean_title(str(tag_block["text"]).splitlines()[0])
+                    intro_open = False
                 blocks_metadata.append({
                     "order": len(blocks_metadata) + 1,
-                    "title": clean_title(str(tag_block["text"]).splitlines()[0]),
+                    "title": title,
                     "script": script_path.name,
                     "start_sec": segment[0],
                     "end_sec": segment[1],

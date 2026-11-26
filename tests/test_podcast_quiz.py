@@ -230,7 +230,12 @@ class PodcastQuizTests(unittest.TestCase):
         self.assertEqual(len(result.splitlines()), 13)
         self.assertEqual(len(metadata["quiz"]), 12)
         self.assertEqual(metadata["schema_version"], 1)
-        self.assertEqual([block["order"] for block in metadata["blocks"]], [1, 2, 3, 4, 5])
+        self.assertEqual([block["order"] for block in metadata["blocks"]], [1, 2, 3])
+        self.assertEqual(metadata["blocks"][0]["title"], "Intro")
+        self.assertEqual(
+            (metadata["blocks"][0]["start_sec"], metadata["blocks"][0]["end_sec"]), (0, 30),
+        )
+        self.assertEqual(metadata["blocks"][1]["title"], "Theory")
         self.assertEqual(metadata["audio"]["duration_sec"], 50.24)
         self.assertEqual(len(metadata["generated"]["scripts_hash"]), 64)
         self.assertEqual(metadata["generated"]["voice"], podcast_manifest.reference_voice_id(str(self.root / "voice.wav")))
@@ -285,7 +290,8 @@ class PodcastQuizTests(unittest.TestCase):
             path.write_text(content, encoding="utf-8")
         self.app["generate_tts_audio"]("", str(scripts_dir), None, "es")
         metadata = self.app["load_json"](self.app["PUBLISH_DIR"] / "demo" / "es" / "ch01" / "v1" / "ch01.json")
-        self.assertEqual(len(metadata["blocks"]), 5)
+        self.assertEqual(len(metadata["blocks"]), 3)
+        self.assertEqual(metadata["blocks"][0]["end_sec"], 30)
         self.assertEqual(metadata["blocks"][-1]["start_sec"], 40)
         self.assertEqual(metadata["blocks"][-1]["end_sec"], 50)
         self.assertEqual(len(metadata["quiz"]), 12)

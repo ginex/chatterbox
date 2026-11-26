@@ -86,9 +86,11 @@ total time between spoken blocks, a measured average, or a quiz-response timeout
 Jingle-only intervals remain variable. Silence is quantized to the nearest
 sample. A value of `0` preserves the old transition behavior.
 
-Each theory tag now gets its own manifest block, including all three introductory
-tags, instead of grouping multiple tags/files into one introduction. Blocks have
-consecutive orders starting at `1`. `script` is the source basename. Sample
+Each theory section after the introduction gets its own manifest block. The
+podcast title, chapter title and chapter intro tags (`NOMBRE_PODCAST`,
+`NOMBRE_CAPITULO`, `INTRO_CAPITULO`) form a **single block titled `Intro`**
+spanning from the start of the first to the end of the last. Blocks have
+consecutive orders starting at `1`: Intro, block 1, block 2, and so on. `script` is the source basename. Sample
 offsets come from the finished mix after inserting silence, crossfading jingles,
 and appending the closing jingle; division by sample rate retains decimal
 precision. The closing jingle belongs to the last block.
